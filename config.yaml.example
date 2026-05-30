@@ -2,10 +2,10 @@ telegram:
   # Watcher account A. This is the Telegram user account that receives Chinese messages.
   api_id: "${TELEGRAM_API_ID}"
   api_hash: "${TELEGRAM_API_HASH}"
-  session_name: "translator_session"
+  session_name: "/app/sessions/user_session"
 
   # Sender bot. User B must start this bot before it can send private messages.
-  bot_session_name: "translator_bot_session"
+  bot_session_name: "/app/sessions/translator_bot_session"
   bot_token: "${TELEGRAM_BOT_TOKEN}"
   send_translations_to_chat_id: "${TELEGRAM_BOT_CHAT_ID}"
   send_summaries_to_chat_id: "${TELEGRAM_BOT_CHAT_ID}"

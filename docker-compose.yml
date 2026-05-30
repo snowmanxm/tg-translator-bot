@@ -1,0 +1,13 @@
+services:
+  bot:
+    build: .
+    image: translator-tgbot:local
+    restart: unless-stopped
+    env_file:
+      - .env.docker
+    volumes:
+      - ./config.yaml:/app/config.yaml:ro
+      - ./.env.docker:/app/.env:ro
+      - ./sessions:/app/sessions
+    extra_hosts:
+      - "host.docker.internal:host-gateway"

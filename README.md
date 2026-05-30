@@ -35,6 +35,52 @@ python -m translator_bot test-send
 python -m translator_bot run
 ```
 
+## Docker
+
+The Docker setup keeps `.env`, `config.yaml`, and Telegram session files on the host.
+
+Create the host session directory:
+
+```bash
+mkdir -p sessions
+```
+
+For Docker, set session paths in `config.yaml` under the mounted session directory:
+
+```yaml
+telegram:
+  session_name: "/app/sessions/user_a_session"
+  bot_session_name: "/app/sessions/translator_bot_session"
+```
+
+Build and run:
+
+```bash
+docker compose build
+docker compose up -d
+```
+
+Run setup/helper commands through Compose:
+
+```bash
+docker compose run --rm bot validate-config
+docker compose run --rm bot list-chats
+docker compose run --rm bot list-bot-chats
+docker compose run --rm bot test-send
+```
+
+If MongoDB runs on your host machine, use `host.docker.internal` in `.env`:
+
+```env
+MONGODB_URI=mongodb://host.docker.internal:27017/telegram_translator_bot
+```
+
+View logs:
+
+```bash
+docker compose logs -f bot
+```
+
 ## Useful Commands
 
 Send these commands to the Telegram bot from user B's account or configured `control_chat_id`:

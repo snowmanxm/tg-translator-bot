@@ -1,6 +1,7 @@
-.venv/
-config.yaml
-.env
-*.session
-*.session-journal
+/.venv/
+config.yaml*
+!config.yaml.example
+.env*
+!.env.example
+/sessions/
 __pycache__/
