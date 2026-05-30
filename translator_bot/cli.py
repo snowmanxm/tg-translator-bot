@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from pathlib import Path
 
 import typer
@@ -18,6 +19,7 @@ console = Console()
 @app.command()
 def run(config: Path = typer.Option(Path("config.yaml"), "--config", "-c", help="Path to config YAML.")) -> None:
     """Run the Telegram translator bot."""
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     settings = load_settings(config)
     translator = TelegramTranslatorApp(settings, config_path=config)
     asyncio.run(translator.run())

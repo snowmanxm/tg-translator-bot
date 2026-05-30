@@ -48,18 +48,15 @@ def format_translation(
             alert_lines.append("Question/request")
         if alerts.get("urgent"):
             alert_lines.append("Urgent")
-    alert_text = f"\nAlerts: {', '.join(alert_lines)}" if alert_lines else ""
-
     parts = [
-        "<b>Translation</b>",
         f"Chat: {escape(chat_title)}",
         f"From: {escape(sender_name)}",
-        alert_text.strip(),
-        "",
     ]
+    if alert_lines:
+        parts.append(f"Alerts: {', '.join(alert_lines)}")
     if include_original:
-        parts.extend(["<b>Original</b>", escape(original), ""])
-    parts.extend(["<b>English</b>", escape(translation)])
+        parts.extend(["", escape(original)])
+    parts.extend(["", escape(translation)])
     return "\n".join(part for part in parts if part != "")
 
 

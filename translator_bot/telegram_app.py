@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -16,6 +17,9 @@ from translator_bot.formatting import format_summary, format_translation, split_
 from translator_bot.language import contains_chinese
 from translator_bot.scheduler import SummaryScheduler
 from translator_bot.storage import MongoStorage
+
+
+logger = logging.getLogger(__name__)
 
 
 class TelegramTranslatorApp:
@@ -48,10 +52,15 @@ class TelegramTranslatorApp:
             self.config_watcher.start()
 
         await self.client.start()
-        await self._send_to_destination(
-            self.settings.telegram.send_translations_to,
-            "Translator bot started.",
-        )
+        logger.info("Telegram client started")
+        try:
+            await self._send_to_destination(
+                self.settings.telegram.send_translations_to,
+                "Translator bot started.",
+            )
+            logger.info("Startup notification sent")
+        except Exception:
+            logger.exception("Failed to send startup notification; continuing to watch messages")
         try:
             await self.client.run_until_disconnected()
         finally:
@@ -63,11 +72,17 @@ class TelegramTranslatorApp:
     def _register_handlers(self) -> None:
         @self.client.on(events.NewMessage(incoming=True))
         async def incoming_handler(event: events.NewMessage.Event) -> None:
-            await self._handle_incoming(event.message)
+            try:
+                await self._handle_incoming(event.message)
+            except Exception:
+                logger.exception("Failed to handle incoming message")
 
         @self.client.on(events.NewMessage(outgoing=True))
         async def command_handler(event: events.NewMessage.Event) -> None:
-            await self._handle_command(event.message)
+            try:
+                await self._handle_command(event.message)
+            except Exception:
+                logger.exception("Failed to handle outgoing command")
 
     async def _handle_incoming(self, message: Message) -> None:
         text = message.raw_text or ""
@@ -78,8 +93,10 @@ class TelegramTranslatorApp:
         sender_id = int(message.sender_id or 0)
         chat_settings = self.settings.chat_for(chat_id)
         if not chat_settings or not chat_settings.enabled:
+            logger.info("Skipping message from unconfigured or disabled chat_id=%s", chat_id)
             return
         if chat_id in self.settings.ignore.chats or sender_id in self.settings.ignore.users:
+            logger.info("Skipping ignored chat_id=%s sender_id=%s", chat_id, sender_id)
             return
 
         chat = await message.get_chat()
@@ -103,6 +120,7 @@ class TelegramTranslatorApp:
         }
 
         if is_chinese:
+            logger.info("Translating Chinese message chat_id=%s message_id=%s", chat_id, message.id)
             translation = await self.ai.translate(text, chat_title=chat_title, sender_name=sender_name)
             alerts = await self.ai.analyze_alerts(text, sender_name=sender_name, chat_title=chat_title)
             important = translation.important or bool(alerts.get("name_mention")) or bool(alerts.get("question_or_request")) or bool(alerts.get("urgent"))
@@ -116,6 +134,9 @@ class TelegramTranslatorApp:
             )
             if self._should_send_translation(chat_settings, important):
                 await self._send_translation(chat_title, sender_name, text, translation.english, alerts)
+                logger.info("Sent translation chat_id=%s message_id=%s", chat_id, message.id)
+        else:
+            logger.info("Stored non-Chinese message chat_id=%s message_id=%s", chat_id, message.id)
 
         await self.storage.save_message(document)
 
@@ -227,8 +248,20 @@ class TelegramTranslatorApp:
         await self._send_to_destination(self.settings.telegram.send_summaries_to_chat_id, formatted)
 
     async def _send_to_destination(self, destination: str | int, text: str) -> None:
+        if isinstance(destination, str) and destination.strip().lstrip("-").isdigit():
+            destination = int(destination)
+        resolved_destination = await self._resolve_destination(destination)
         for chunk in split_telegram_message(text):
-            await self.client.send_message(destination, chunk, parse_mode="html")
+            await self.client.send_message(resolved_destination, chunk, parse_mode="html")
+
+    async def _resolve_destination(self, destination: str | int):
+        if not isinstance(destination, int):
+            return destination
+
+        async for dialog in self.client.iter_dialogs():
+            if dialog.id == destination:
+                return dialog.entity
+        return await self.client.get_entity(destination)
 
     def _schedule_config_reload(self) -> None:
         if self.loop:
