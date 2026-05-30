@@ -8,6 +8,7 @@ import typer
 from rich.console import Console
 from telethon import TelegramClient
 
+from translator_bot.bot_api import BotApiError, fetch_bot_updates, send_bot_message_sync
 from translator_bot.config import load_settings
 from translator_bot.telegram_app import TelegramTranslatorApp, list_dialogs
 
@@ -36,7 +37,7 @@ def validate_config(config: Path = typer.Option(Path("config.yaml"), "--config",
 
 @app.command("list-chats")
 def list_chats(config: Path = typer.Option(Path("config.yaml"), "--config", "-c")) -> None:
-    """Log in to Telegram and print dialog IDs for config.yaml."""
+    """Log in as watcher account A and print dialog IDs for watched chats."""
     settings = load_settings(config)
 
     async def _run() -> None:
@@ -53,20 +54,67 @@ def list_chats(config: Path = typer.Option(Path("config.yaml"), "--config", "-c"
 
 @app.command("test-send")
 def test_send(config: Path = typer.Option(Path("config.yaml"), "--config", "-c")) -> None:
-    """Send test messages to the translation and summary destinations."""
+    """Send test messages through the sender bot to user B destinations."""
     settings = load_settings(config)
+    try:
+        send_bot_message_sync(
+            settings.telegram.bot_token,
+            settings.telegram.send_translations_to_chat_id,
+            "Test translation destination OK.",
+        )
+        send_bot_message_sync(
+            settings.telegram.bot_token,
+            settings.telegram.send_summaries_to_chat_id,
+            "Test summary destination OK.",
+        )
+    except BotApiError as exc:
+        console.print("[red]Bot test send failed.[/red]")
+        console.print(str(exc))
+        console.print("Make sure user B has opened the bot and sent /start, then run:")
+        console.print("[bold]python -m translator_bot list-bot-chats[/bold]")
+        console.print("Use that ID for send_translations_to_chat_id and send_summaries_to_chat_id.")
+        raise typer.Exit(code=1) from exc
+    console.print("[green]Test messages sent.[/green]")
 
-    async def _run() -> None:
-        client = TelegramClient(settings.telegram.session_name, settings.telegram.api_id, settings.telegram.api_hash)
-        await client.start()
-        try:
-            await client.send_message(settings.telegram.send_translations_to, "Test translation destination OK.")
-            await client.send_message(settings.telegram.send_summaries_to_chat_id, "Test summary destination OK.")
-            console.print("[green]Test messages sent.[/green]")
-        finally:
-            await client.disconnect()
 
-    asyncio.run(_run())
+@app.command("list-bot-chats")
+def list_bot_chats(config: Path = typer.Option(Path("config.yaml"), "--config", "-c")) -> None:
+    """Print chats that have messaged the sender bot via Bot API updates."""
+    settings = load_settings(config)
+    updates = fetch_bot_updates(settings.telegram.bot_token)
+    chats: dict[int, dict[str, str | int | None]] = {}
+
+    for update in updates:
+        message = (
+            update.get("message")
+            or update.get("edited_message")
+            or update.get("channel_post")
+            or update.get("edited_channel_post")
+        )
+        if not isinstance(message, dict):
+            continue
+        chat = message.get("chat")
+        if not isinstance(chat, dict) or not isinstance(chat.get("id"), int):
+            continue
+        chat_id = chat["id"]
+        title = chat.get("title") or " ".join(
+            part for part in [chat.get("first_name"), chat.get("last_name")] if isinstance(part, str)
+        )
+        chats[chat_id] = {
+            "id": chat_id,
+            "type": chat.get("type"),
+            "name": title or chat.get("username") or "",
+            "username": chat.get("username"),
+        }
+
+    if not chats:
+        console.print("[yellow]No bot chats found.[/yellow]")
+        console.print("Open the bot as user B, send /start or any message, then run this command again.")
+        return
+
+    for chat in chats.values():
+        username = f" | Username: @{chat['username']}" if chat.get("username") else ""
+        console.print(f"ID: {chat['id']} | Type: {chat['type']} | Name: {chat['name']}{username}")
 
 
 if __name__ == "__main__":

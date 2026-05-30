@@ -1,13 +1,13 @@
 # Telegram Translator Bot
 
-Private Telegram user-client bot that watches selected Chinese chats, translates incoming messages to English, and sends periodic summaries.
+Private Telegram translator that watches selected Chinese chats from user account A, translates incoming messages, and sends translations/summaries to user B through a Telegram bot.
 
 ## Setup
 
 ```bash
 source .venv/bin/activate
 cp .env.example .env
-cp config.example.yaml config.yaml
+cp config.yaml.example config.yaml
 ```
 
 Edit `.env` and `config.yaml`, then validate:
@@ -16,21 +16,28 @@ Edit `.env` and `config.yaml`, then validate:
 python -m translator_bot validate-config
 ```
 
-Log in and list chats:
+Log in as watcher account A and list chats to watch:
 
 ```bash
 python -m translator_bot list-chats
 ```
 
-Copy chat IDs into `config.yaml`, then run:
+User B must start your Telegram bot first by sending `/start` or any message. Then list Bot API updates to find user B's bot chat ID:
 
 ```bash
+python -m translator_bot list-bot-chats
+```
+
+Copy watcher chat IDs and bot destination chat IDs into `config.yaml`, then test bot delivery and run:
+
+```bash
+python -m translator_bot test-send
 python -m translator_bot run
 ```
 
 ## Useful Commands
 
-Send these commands from your own Telegram account, preferably in your private control chat:
+Send these commands to the Telegram bot from user B's account or configured `control_chat_id`:
 
 - `/list-chats`
 - `/reload-config`

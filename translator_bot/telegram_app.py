@@ -11,6 +11,7 @@ from telethon.tl.custom.message import Message
 from telethon.utils import get_display_name
 
 from translator_bot.ai import OpenAIService
+from translator_bot.bot_api import send_bot_message
 from translator_bot.config import ChatSettings, Settings, load_settings
 from translator_bot.config_watcher import ConfigWatcher
 from translator_bot.formatting import format_summary, format_translation, split_telegram_message
@@ -28,6 +29,11 @@ class TelegramTranslatorApp:
         self.config_path = Path(config_path)
         self.client = TelegramClient(
             settings.telegram.session_name,
+            settings.telegram.api_id,
+            settings.telegram.api_hash,
+        )
+        self.bot_client = TelegramClient(
+            settings.telegram.bot_session_name,
             settings.telegram.api_id,
             settings.telegram.api_hash,
         )
@@ -52,10 +58,11 @@ class TelegramTranslatorApp:
             self.config_watcher.start()
 
         await self.client.start()
-        logger.info("Telegram client started")
+        await self.bot_client.start(bot_token=self.settings.telegram.bot_token)
+        logger.info("Telegram watcher and sender bot started")
         try:
             await self._send_to_destination(
-                self.settings.telegram.send_translations_to,
+                self.settings.telegram.send_translations_to_chat_id,
                 "Translator bot started.",
             )
             logger.info("Startup notification sent")
@@ -67,6 +74,7 @@ class TelegramTranslatorApp:
             self.scheduler.shutdown()
             if self.config_watcher:
                 self.config_watcher.stop()
+            await self.bot_client.disconnect()
             await self.storage.close()
 
     def _register_handlers(self) -> None:
@@ -77,12 +85,12 @@ class TelegramTranslatorApp:
             except Exception:
                 logger.exception("Failed to handle incoming message")
 
-        @self.client.on(events.NewMessage(outgoing=True))
-        async def command_handler(event: events.NewMessage.Event) -> None:
+        @self.bot_client.on(events.NewMessage(incoming=True))
+        async def bot_command_handler(event: events.NewMessage.Event) -> None:
             try:
                 await self._handle_command(event.message)
             except Exception:
-                logger.exception("Failed to handle outgoing command")
+                logger.exception("Failed to handle bot command")
 
     async def _handle_incoming(self, message: Message) -> None:
         text = message.raw_text or ""
@@ -174,7 +182,7 @@ class TelegramTranslatorApp:
             include_original=include_original,
             alerts=alerts,
         )
-        await self._send_to_destination(self.settings.telegram.send_translations_to, message)
+        await self._send_to_destination(self.settings.telegram.send_translations_to_chat_id, message)
 
     async def _handle_command(self, message: Message) -> None:
         text = (message.raw_text or "").strip()
@@ -258,18 +266,8 @@ class TelegramTranslatorApp:
     async def _send_to_destination(self, destination: str | int, text: str) -> None:
         if isinstance(destination, str) and destination.strip().lstrip("-").isdigit():
             destination = int(destination)
-        resolved_destination = await self._resolve_destination(destination)
         for chunk in split_telegram_message(text):
-            await self.client.send_message(resolved_destination, chunk, parse_mode="html")
-
-    async def _resolve_destination(self, destination: str | int):
-        if not isinstance(destination, int):
-            return destination
-
-        async for dialog in self.client.iter_dialogs():
-            if dialog.id == destination:
-                return dialog.entity
-        return await self.client.get_entity(destination)
+            await send_bot_message(self.settings.telegram.bot_token, destination, chunk, parse_mode="HTML")
 
     def _schedule_config_reload(self) -> None:
         if self.loop:
@@ -283,6 +281,8 @@ class TelegramTranslatorApp:
             new_settings.telegram.api_id != self.settings.telegram.api_id
             or new_settings.telegram.api_hash != self.settings.telegram.api_hash
             or new_settings.telegram.session_name != self.settings.telegram.session_name
+            or new_settings.telegram.bot_session_name != self.settings.telegram.bot_session_name
+            or new_settings.telegram.bot_token != self.settings.telegram.bot_token
         ):
             return "Config reload skipped: Telegram credentials/session changed and require restart."
 
@@ -295,7 +295,7 @@ class TelegramTranslatorApp:
             daily_job=self.send_daily_summaries,
             prune_job=self.storage.prune_old_messages,
         )
-        await self._send_to_destination(self.settings.telegram.send_translations_to, "Config reloaded successfully.")
+        await self._send_to_destination(self.settings.telegram.send_translations_to_chat_id, "Config reloaded successfully.")
         return "Config reloaded successfully."
 
     async def _cmd_help(self, args: list[str], message: Message) -> str:
@@ -325,7 +325,7 @@ class TelegramTranslatorApp:
         )
 
     async def _cmd_test_send(self, args: list[str], message: Message) -> str:
-        await self._send_to_destination(self.settings.telegram.send_translations_to, "Test translation destination OK.")
+        await self._send_to_destination(self.settings.telegram.send_translations_to_chat_id, "Test translation destination OK.")
         await self._send_to_destination(self.settings.telegram.send_summaries_to_chat_id, "Test summary destination OK.")
         return "Sent test messages."
 
@@ -335,8 +335,16 @@ class TelegramTranslatorApp:
             title = "Manual Combined Summary"
         else:
             chat_id = int(args[0]) if args else int(message.chat_id or 0)
-            messages = await self.storage.recent_messages(chat_id=chat_id, since=datetime.now(UTC) - timedelta(hours=24), limit=250)
-            title = f"Manual Summary: {chat_id}"
+            if args or self.settings.chat_for(chat_id):
+                messages = await self.storage.recent_messages(
+                    chat_id=chat_id,
+                    since=datetime.now(UTC) - timedelta(hours=24),
+                    limit=250,
+                )
+                title = f"Manual Summary: {chat_id}"
+            else:
+                messages = await self.storage.recent_messages(since=datetime.now(UTC) - timedelta(hours=24), limit=500)
+                title = "Manual Combined Summary"
         if not messages:
             return "No recent stored messages found."
         payload = [_message_for_ai(row) for row in messages]
@@ -345,8 +353,12 @@ class TelegramTranslatorApp:
     async def _cmd_translate_last(self, args: list[str], message: Message) -> str:
         if len(args) == 0:
             chat_id, count = int(message.chat_id or 0), 10
+            if not self.settings.chat_for(chat_id):
+                return "Usage from bot chat: /translate-last <watched_chat_id> <count>"
         elif len(args) == 1:
             chat_id, count = int(message.chat_id or 0), int(args[0])
+            if not self.settings.chat_for(chat_id):
+                return "Usage from bot chat: /translate-last <watched_chat_id> <count>"
         else:
             chat_id, count = int(args[0]), int(args[1])
         rows = await self.storage.last_messages_for_chat(chat_id, min(count, 50))

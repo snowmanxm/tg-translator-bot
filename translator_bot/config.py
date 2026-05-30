@@ -19,11 +19,13 @@ class TelegramSettings(BaseModel):
     api_id: int
     api_hash: str
     session_name: str = "translator_session"
-    send_translations_to: int | str = "me"
+    bot_session_name: str = "translator_bot_session"
+    bot_token: str
+    send_translations_to_chat_id: int | str
     send_summaries_to_chat_id: int | str
     control_chat_id: int | str | None = None
 
-    @field_validator("send_translations_to", "send_summaries_to_chat_id", "control_chat_id", mode="before")
+    @field_validator("send_translations_to_chat_id", "send_summaries_to_chat_id", "control_chat_id", mode="before")
     @classmethod
     def parse_numeric_destination(cls, value: Any) -> Any:
         if isinstance(value, str) and value.strip().lstrip("-").isdigit():
