@@ -9,13 +9,22 @@ from zoneinfo import ZoneInfo
 
 from telethon import TelegramClient, events
 from telethon.tl.custom.message import Message
+from telethon.tl.types import MessageEntityCode, MessageEntityPre
 from telethon.utils import get_display_name
 
 from translator_bot.ai import OpenAIService
 from translator_bot.bot_api import send_bot_message, set_bot_commands
 from translator_bot.config import ChatSettings, Settings, load_settings
 from translator_bot.config_watcher import ConfigWatcher
-from translator_bot.formatting import format_summary, format_translation, split_telegram_message
+from translator_bot.formatting import (
+    format_summary,
+    format_translation,
+    ProtectedRange,
+    mask_protected_ranges,
+    protected_segments_for_ai,
+    restore_protected_segments,
+    split_telegram_message,
+)
 from translator_bot.language import contains_chinese
 from translator_bot.scheduler import SummaryScheduler
 from translator_bot.storage import MongoStorage
@@ -99,6 +108,10 @@ class TelegramTranslatorApp:
         text = message.raw_text or ""
         if not text:
             return
+        masked_text, formatted_text, protected_segments = mask_protected_ranges(
+            text,
+            _protected_ranges_from_entities(text, message.entities or []),
+        )
 
         chat_id = int(message.chat_id or 0)
         sender_id = int(message.sender_id or 0)
@@ -127,6 +140,8 @@ class TelegramTranslatorApp:
             "sender_name": sender_name,
             "sender_username": sender_username,
             "text": text,
+            "formatted_text": formatted_text,
+            "masked_text": masked_text,
             "date": message.date.astimezone(UTC) if message.date else datetime.now(UTC),
             "contains_chinese": is_chinese,
             "translation": None,
@@ -137,11 +152,13 @@ class TelegramTranslatorApp:
         if is_chinese:
             logger.info("Analyzing Chinese message chat_id=%s message_id=%s", chat_id, message.id)
             analysis = await self.ai.analyze_message(
-                text,
+                masked_text,
                 chat_title=chat_title,
                 sender_name=sender_name,
+                protected_placeholders=protected_segments_for_ai(protected_segments),
                 known_chat_title_english=chat_title_translation,
             )
+            translation = restore_protected_segments(analysis.message_english, protected_segments, append_missing=True)
             chat_title_translation = analysis.chat_title_english
             self.chat_title_cache[chat_title] = chat_title_translation
             alerts = analysis.alerts
@@ -149,7 +166,7 @@ class TelegramTranslatorApp:
             document.update(
                 {
                     "chat_title_translation": chat_title_translation,
-                    "translation": analysis.message_english,
+                    "translation": translation,
                     "important": important,
                     "alerts": alerts,
                 }
@@ -163,8 +180,8 @@ class TelegramTranslatorApp:
                     chat_title_translation,
                     sender_name,
                     sender_username,
-                    text,
-                    analysis.message_english,
+                    formatted_text,
+                    translation,
                     important=important,
                 )
                 logger.info("Sent translation chat_id=%s message_id=%s", chat_id, message.id)
@@ -535,6 +552,44 @@ def _chat_display_for_summary(chat_title: str, chat_title_translation: Any) -> s
     if not chat_title_translation or str(chat_title_translation).casefold() == chat_title.casefold():
         return f"`{chat_title}`"
     return f"`{chat_title}` / `{chat_title_translation}`"
+
+
+def _protected_ranges_from_entities(text: str, entities: list[Any]) -> list[ProtectedRange]:
+    ranges: list[ProtectedRange] = []
+    for entity in entities:
+        if not isinstance(entity, (MessageEntityPre, MessageEntityCode)):
+            continue
+        start = _utf16_offset_to_index(text, int(entity.offset))
+        end = _utf16_offset_to_index(text, int(entity.offset + entity.length))
+        kind = "code_block" if isinstance(entity, MessageEntityPre) else "inline_code"
+        language = getattr(entity, "language", None) if kind == "code_block" else None
+        if kind == "code_block" and not text[start:end].strip() and language:
+            recovered_start = start
+            recovered_end = end
+            if start > 0 and text[start - 1] == "\n":
+                recovered_start = start - 1
+            ranges.append(
+                ProtectedRange(
+                    kind="inline_code",
+                    start=recovered_start,
+                    end=recovered_end,
+                    language=str(language),
+                )
+            )
+            continue
+        if start >= end:
+            continue
+        ranges.append(ProtectedRange(kind=kind, start=start, end=end, language=language or None))
+    return ranges
+
+
+def _utf16_offset_to_index(text: str, offset: int) -> int:
+    units = 0
+    for index, character in enumerate(text):
+        if units >= offset:
+            return index
+        units += 2 if ord(character) > 0xFFFF else 1
+    return len(text)
 
 
 def _important_reason(reason: str | None, alerts: dict[str, bool]) -> str | None:

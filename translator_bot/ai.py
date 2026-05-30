@@ -29,6 +29,7 @@ class OpenAIService:
         *,
         chat_title: str,
         sender_name: str,
+        protected_placeholders: list[dict[str, str | None]] | None = None,
         known_chat_title_english: str | None = None,
     ) -> MessageAnalysisResult:
         names = self.settings.alerts.names
@@ -45,6 +46,11 @@ class OpenAIService:
                         "alerts must be an object with booleans: name_mention, question_or_request, urgent. "
                         "Translate the message into natural English. Translate the chat title into concise English; "
                         "if known_chat_title_english is provided, reuse it unless clearly wrong. "
+                        "The message may contain protected placeholders like XM_PROTECTED_SEGMENT_0. "
+                        "Copy placeholders exactly into message_english where they belong. "
+                        "Never translate, remove, duplicate, wrap, indent, or modify placeholders. "
+                        "Use inline_code placeholder content as context only; do not translate that content. "
+                        "Code block placeholder content is intentionally omitted and must not be inferred. "
                         "Mark important true for requests, questions, decisions, deadlines, complaints, "
                         "money/payment, meetings, risks, urgent messages, or watched-name mentions. "
                         "For unimportant messages, important_reason must be null. "
@@ -61,6 +67,7 @@ class OpenAIService:
                             "known_chat_title_english": known_chat_title_english,
                             "sender": sender_name,
                             "message": text,
+                            "protected_placeholders": protected_placeholders or [],
                         },
                         ensure_ascii=False,
                     ),
