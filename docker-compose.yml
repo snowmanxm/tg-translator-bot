@@ -9,5 +9,6 @@ services:
       - ./config.yaml:/app/config.yaml:ro
       - ./.env.docker:/app/.env:ro
       - ./sessions:/app/sessions
+      - ./tmp/attachments:/app/tmp/attachments
     extra_hosts:
       - "host.docker.internal:host-gateway"

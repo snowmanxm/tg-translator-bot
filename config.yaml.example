@@ -63,6 +63,13 @@ summary:
 storage:
   auto_delete_after_days: 30
 
+attachments:
+  enabled: true
+  forward_displayable: true
+  temp_dir: "${ATTACHMENT_TEMP_DIR}"
+  download_max_mb: 20
+  keep_downloaded_files: false
+
 runtime:
   config_reload_enabled: true
   command_prefix: "/"

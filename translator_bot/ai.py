@@ -136,6 +136,10 @@ class OpenAIService:
                         "the source chat display in parentheses, wrapping chat names with backticks. "
                         "Use the provided chat_display field exactly as-is when available, for example: "
                         "'- Backend support can wait until tomorrow. (`技术群` / `Tech Group`)' "
+                        "Messages may include an attachment object with type, name, mime_type, and size. "
+                        "Mention attachments naturally when they affect the meaning, request, evidence, "
+                        "or action item, for example screenshots, error images, PDFs, voice messages, "
+                        "or videos. Do not add a separate attachment section just to list files. "
                         "If a section has no useful content, write '- None mentioned.' "
                         "Ignore small talk unless it changes the situation."
                     ),

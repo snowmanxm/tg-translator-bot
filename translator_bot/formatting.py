@@ -70,9 +70,10 @@ def format_translation(
         f"{_importance_emoji(important, alerts)}{chat}",
         f"👤 {sender}",
     ]
-    if include_original:
+    if include_original and original:
         parts.extend(["", "🇨🇳", render_message_body(original)])
-    parts.extend(["", "🇬🇧", render_message_body(translation)])
+    if translation:
+        parts.extend(["", "🇬🇧", render_message_body(translation)])
     return "\n".join(part for part in parts if part != "")
 
 

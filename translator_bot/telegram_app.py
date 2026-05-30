@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from contextlib import suppress
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -13,7 +14,7 @@ from telethon.tl.types import MessageEntityCode, MessageEntityPre
 from telethon.utils import get_display_name
 
 from translator_bot.ai import OpenAIService
-from translator_bot.bot_api import send_bot_message, set_bot_commands
+from translator_bot.bot_api import send_bot_media, send_bot_message, set_bot_commands
 from translator_bot.config import ChatSettings, Settings, load_settings
 from translator_bot.config_watcher import ConfigWatcher
 from translator_bot.formatting import (
@@ -106,7 +107,8 @@ class TelegramTranslatorApp:
 
     async def _handle_incoming(self, message: Message) -> None:
         text = message.raw_text or ""
-        if not text:
+        attachment = _attachment_metadata(message)
+        if not text and not attachment:
             return
         masked_text, formatted_text, protected_segments = mask_protected_ranges(
             text,
@@ -142,6 +144,7 @@ class TelegramTranslatorApp:
             "text": text,
             "formatted_text": formatted_text,
             "masked_text": masked_text,
+            "attachment": attachment,
             "date": message.date.astimezone(UTC) if message.date else datetime.now(UTC),
             "contains_chinese": is_chinese,
             "translation": None,
@@ -176,18 +179,31 @@ class TelegramTranslatorApp:
                 document["important_reason"] = important_reason
             if self._should_send_translation(chat_settings, important):
                 await self._send_translation(
-                    chat_title,
-                    chat_title_translation,
-                    sender_name,
-                    sender_username,
-                    formatted_text,
-                    translation,
+                    source_message=message,
+                    chat_title=chat_title,
+                    chat_title_translation=chat_title_translation,
+                    sender_name=sender_name,
+                    sender_username=sender_username,
+                    original=formatted_text,
+                    translation=translation,
                     important=important,
                     alerts=alerts,
                 )
                 logger.info("Sent translation chat_id=%s message_id=%s", chat_id, message.id)
         else:
             logger.info("Stored non-Chinese message chat_id=%s message_id=%s", chat_id, message.id)
+            if attachment and self._should_send_attachment_only(chat_settings):
+                await self._send_translation(
+                    source_message=message,
+                    chat_title=chat_title,
+                    chat_title_translation=chat_title_translation,
+                    sender_name=sender_name,
+                    sender_username=sender_username,
+                    original=formatted_text,
+                    translation="",
+                    important=False,
+                    alerts=None,
+                )
 
         await self.storage.save_message(document)
 
@@ -200,8 +216,18 @@ class TelegramTranslatorApp:
             return False
         return True
 
+    def _should_send_attachment_only(self, chat_settings: ChatSettings) -> bool:
+        if not self.settings.attachments.enabled or not self.settings.attachments.forward_displayable:
+            return False
+        if not self.settings.features.instant_translation:
+            return False
+        if not chat_settings.instant_translation or chat_settings.muted or chat_settings.important_only:
+            return False
+        return True
+
     async def _send_translation(
         self,
+        source_message: Message | None,
         chat_title: str,
         chat_title_translation: str | None,
         sender_name: str,
@@ -223,7 +249,11 @@ class TelegramTranslatorApp:
             important=important,
             alerts=alerts,
         )
-        await self._send_to_destination(self.settings.telegram.send_translations_to_chat_id, message)
+        await self._send_to_destination(
+            self.settings.telegram.send_translations_to_chat_id,
+            message,
+            source_message=source_message,
+        )
 
     async def _handle_command(self, message: Message) -> None:
         text = (message.raw_text or "").strip()
@@ -343,11 +373,57 @@ class TelegramTranslatorApp:
             ],
         )
 
-    async def _send_to_destination(self, destination: str | int, text: str) -> None:
+    async def _send_to_destination(
+        self,
+        destination: str | int,
+        text: str,
+        *,
+        source_message: Message | None = None,
+    ) -> None:
         if isinstance(destination, str) and destination.strip().lstrip("-").isdigit():
             destination = int(destination)
+        media_path: Path | None = None
+        media_type: str | None = None
+        if source_message and self.settings.attachments.enabled and self.settings.attachments.forward_displayable:
+            media_type = _displayable_media_type(source_message)
+            if media_type and _media_within_size_limit(source_message, self.settings.attachments.download_max_mb):
+                media_path = await self._download_attachment(source_message)
+
+        if media_path and media_type:
+            try:
+                if len(text) <= 1024 and _media_supports_caption(media_type):
+                    await send_bot_media(
+                        self.settings.telegram.bot_token,
+                        destination,
+                        media_path,
+                        media_type=media_type,
+                        caption=text,
+                        parse_mode="HTML",
+                    )
+                    return
+                await send_bot_media(
+                    self.settings.telegram.bot_token,
+                    destination,
+                    media_path,
+                    media_type=media_type,
+                )
+                if not text:
+                    return
+            finally:
+                if not self.settings.attachments.keep_downloaded_files:
+                    with suppress(OSError):
+                        media_path.unlink()
+
+        if not text:
+            return
         for chunk in split_telegram_message(text):
             await send_bot_message(self.settings.telegram.bot_token, destination, chunk, parse_mode="HTML")
+
+    async def _download_attachment(self, message: Message) -> Path | None:
+        temp_dir = Path(self.settings.attachments.temp_dir)
+        temp_dir.mkdir(parents=True, exist_ok=True)
+        downloaded = await message.download_media(file=str(temp_dir))
+        return Path(downloaded) if downloaded else None
 
     def _schedule_config_reload(self) -> None:
         if self.loop:
@@ -540,6 +616,7 @@ def _message_for_ai(message: dict[str, Any]) -> dict[str, Any]:
         "translation": message.get("translation"),
         "important": message.get("important"),
         "alerts": message.get("alerts"),
+        "attachment": message.get("attachment"),
     }
 
 
@@ -549,6 +626,66 @@ def _chat_title_translation_from_messages(messages: list[dict[str, Any]]) -> str
         if translation:
             return str(translation)
     return None
+
+
+def _attachment_metadata(message: Message) -> dict[str, Any] | None:
+    media_type = _displayable_media_type(message)
+    file = getattr(message, "file", None)
+    if not media_type or not file:
+        return None
+    return {
+        "type": media_type,
+        "name": getattr(file, "name", None),
+        "mime_type": getattr(file, "mime_type", None),
+        "size": getattr(file, "size", None),
+    }
+
+
+def _displayable_media_type(message: Message) -> str | None:
+    if not getattr(message, "media", None):
+        return None
+    if getattr(message, "photo", None):
+        return "photo"
+    if getattr(message, "sticker", None):
+        return "sticker"
+    if getattr(message, "voice", None):
+        return "voice"
+    if getattr(message, "video_note", None):
+        return "video_note"
+    if getattr(message, "gif", None):
+        return "animation"
+    if getattr(message, "video", None):
+        return "video"
+    if getattr(message, "audio", None):
+        return "audio"
+
+    file = getattr(message, "file", None)
+    mime_type = getattr(file, "mime_type", None) if file else None
+    if mime_type == "image/gif":
+        return "animation"
+    if mime_type and mime_type.startswith("image/"):
+        return "photo"
+    if mime_type and mime_type.startswith("video/"):
+        return "video"
+    if mime_type and mime_type.startswith("audio/"):
+        return "audio"
+    if file:
+        return "document"
+    return None
+
+
+def _media_within_size_limit(message: Message, max_mb: int) -> bool:
+    if max_mb <= 0:
+        return True
+    file = getattr(message, "file", None)
+    size = getattr(file, "size", None) if file else None
+    if size is None:
+        return True
+    return int(size) <= max_mb * 1024 * 1024
+
+
+def _media_supports_caption(media_type: str) -> bool:
+    return media_type not in {"sticker", "video_note"}
 
 
 def _chat_display_for_summary(chat_title: str, chat_title_translation: Any) -> str:

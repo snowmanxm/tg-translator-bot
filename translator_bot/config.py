@@ -106,6 +106,14 @@ class StorageSettings(BaseModel):
     auto_delete_after_days: int = 30
 
 
+class AttachmentSettings(BaseModel):
+    enabled: bool = True
+    forward_displayable: bool = True
+    temp_dir: str = "./tmp/attachments"
+    download_max_mb: int = 20
+    keep_downloaded_files: bool = False
+
+
 class RuntimeSettings(BaseModel):
     config_reload_enabled: bool = True
     command_prefix: str = "/"
@@ -123,6 +131,7 @@ class Settings(BaseModel):
     ignore: IgnoreSettings = Field(default_factory=IgnoreSettings)
     summary: SummarySettings = Field(default_factory=SummarySettings)
     storage: StorageSettings = Field(default_factory=StorageSettings)
+    attachments: AttachmentSettings = Field(default_factory=AttachmentSettings)
     runtime: RuntimeSettings = Field(default_factory=RuntimeSettings)
 
     @model_validator(mode="after")
