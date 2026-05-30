@@ -1,0 +1,63 @@
+telegram:
+  api_id: "${TELEGRAM_API_ID}"
+  api_hash: "${TELEGRAM_API_HASH}"
+  session_name: "translator_session"
+  send_translations_to: "me"
+  send_summaries_to_chat_id: "${TELEGRAM_SUMMARY_CHAT_ID}"
+  control_chat_id: null
+
+openai:
+  api_key: "${OPENAI_API_KEY}"
+  translation_model: "gpt-4.1-mini"
+  summary_model: "gpt-4.1-mini"
+  alert_model: "gpt-4.1-mini"
+
+mongodb:
+  uri: "${MONGODB_URI}"
+
+features:
+  instant_translation: true
+  batch_translation: true
+  hourly_summary: true
+  daily_summary: true
+  original_plus_translation: true
+  translation_only_view: false
+  important_points: true
+  action_items: true
+  meeting_detection: true
+  unread_catchup: true
+
+alerts:
+  name_mentions_enabled: true
+  names:
+    - "your name"
+    - "your nickname"
+  question_request_alert: true
+  urgency_alert: true
+
+chats:
+  - id: -1001111111111
+    name: "Example Work Group"
+    enabled: true
+    instant_translation: true
+    summaries: true
+    important_only: false
+    muted: false
+
+ignore:
+  users: []
+  chats: []
+
+summary:
+  hourly_cron: "0 * * * *"
+  daily_cron: "0 21 * * *"
+  timezone: "UTC"
+  combined_summary: true
+  per_chat_summary: true
+
+storage:
+  auto_delete_after_days: 30
+
+runtime:
+  config_reload_enabled: true
+  command_prefix: "/"
