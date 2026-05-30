@@ -183,6 +183,7 @@ class TelegramTranslatorApp:
                     formatted_text,
                     translation,
                     important=important,
+                    alerts=alerts,
                 )
                 logger.info("Sent translation chat_id=%s message_id=%s", chat_id, message.id)
         else:
@@ -208,6 +209,7 @@ class TelegramTranslatorApp:
         original: str,
         translation: str,
         important: bool = False,
+        alerts: dict[str, bool] | None = None,
     ) -> None:
         include_original = self.settings.features.original_plus_translation
         message = format_translation(
@@ -219,6 +221,7 @@ class TelegramTranslatorApp:
             translation=translation,
             include_original=include_original,
             important=important,
+            alerts=alerts,
         )
         await self._send_to_destination(self.settings.telegram.send_translations_to_chat_id, message)
 

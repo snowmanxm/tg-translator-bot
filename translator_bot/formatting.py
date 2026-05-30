@@ -59,6 +59,7 @@ def format_translation(
     translation: str,
     include_original: bool,
     important: bool = False,
+    alerts: dict[str, bool] | None = None,
 ) -> str:
     sender = f"<code>{escape(sender_name)}</code>"
     if sender_username:
@@ -66,7 +67,7 @@ def format_translation(
 
     chat = _format_chat_name(chat_title, chat_title_translation)
     parts = [
-        f"{'⚠️ ' if important else ''}{chat}",
+        f"{_importance_emoji(important, alerts)}{chat}",
         f"👤 {sender}",
     ]
     if include_original:
@@ -94,6 +95,19 @@ def _format_chat_name(chat_name: str, chat_name_translation: str | None) -> str:
     if not chat_name_translation or chat_name_translation.casefold() == chat_name.casefold():
         return original
     return f"{original} / <code>{escape(chat_name_translation)}</code>"
+
+
+def _importance_emoji(important: bool, alerts: dict[str, bool] | None) -> str:
+    if alerts:
+        if alerts.get("urgent"):
+            return "🚨 "
+        if alerts.get("name_mention"):
+            return "📢 "
+        if alerts.get("question_or_request"):
+            return "❓ "
+    if important:
+        return "⚠️ "
+    return ""
 
 
 def render_message_body(text: str) -> str:
