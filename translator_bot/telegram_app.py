@@ -142,8 +142,6 @@ class TelegramTranslatorApp:
             "sender_name": sender_name,
             "sender_username": sender_username,
             "text": text,
-            "formatted_text": formatted_text,
-            "masked_text": masked_text,
             "attachment": attachment,
             "date": message.date.astimezone(UTC) if message.date else datetime.now(UTC),
             "contains_chinese": is_chinese,
