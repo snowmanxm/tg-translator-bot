@@ -33,7 +33,9 @@ class OpenAIService:
                         "Translate Chinese chat messages to natural English. "
                         "Return JSON with keys: english, important, reason. "
                         "Mark important true for requests, decisions, deadlines, complaints, "
-                        "money/payment, meetings, risks, or urgent messages."
+                        "money/payment, meetings, risks, or urgent messages. "
+                        "For unimportant messages, reason must be null. "
+                        "For important messages, reason must be under 80 characters."
                     ),
                 },
                 {
@@ -46,10 +48,12 @@ class OpenAIService:
             ],
         )
         data = _json_from_response(response.choices[0].message.content)
+        important = bool(data.get("important", False))
+        reason = str(data["reason"]).strip() if important and data.get("reason") else None
         return TranslationResult(
             english=str(data.get("english", "")).strip() or text,
-            important=bool(data.get("important", False)),
-            reason=str(data["reason"]).strip() if data.get("reason") else None,
+            important=important,
+            reason=_short_text(reason, 80),
         )
 
     async def translate_batch(self, messages: list[dict[str, Any]]) -> str:
@@ -80,7 +84,8 @@ class OpenAIService:
                     "role": "system",
                     "content": (
                         "Analyze a Telegram message. Return JSON with booleans: "
-                        "name_mention, question_or_request, urgent, and a string reason. "
+                        "name_mention, question_or_request, urgent. "
+                        "Do not include explanations or reason fields. "
                         "Only set true when the signal is clear."
                     ),
                 },
@@ -105,7 +110,6 @@ class OpenAIService:
             if self.settings.alerts.question_request_alert
             else False,
             "urgent": bool(data.get("urgent")) if self.settings.alerts.urgency_alert else False,
-            "reason": data.get("reason"),
         }
 
     async def summarize(self, messages: list[dict[str, Any]], *, title: str) -> str:
@@ -142,3 +146,12 @@ def _json_from_response(content: str | None) -> dict[str, Any]:
     except json.JSONDecodeError:
         return {}
     return value if isinstance(value, dict) else {}
+
+
+def _short_text(value: str | None, limit: int) -> str | None:
+    if not value:
+        return None
+    value = " ".join(value.split())
+    if len(value) <= limit:
+        return value
+    return value[: limit - 3].rstrip() + "..."

@@ -123,15 +123,23 @@ class TelegramTranslatorApp:
             logger.info("Translating Chinese message chat_id=%s message_id=%s", chat_id, message.id)
             translation = await self.ai.translate(text, chat_title=chat_title, sender_name=sender_name)
             alerts = await self.ai.analyze_alerts(text, sender_name=sender_name, chat_title=chat_title)
-            important = translation.important or bool(alerts.get("name_mention")) or bool(alerts.get("question_or_request")) or bool(alerts.get("urgent"))
+            alerts = _compact_alerts(alerts)
+            important = (
+                translation.important
+                or bool(alerts.get("name_mention"))
+                or bool(alerts.get("question_or_request"))
+                or bool(alerts.get("urgent"))
+            )
             document.update(
                 {
                     "translation": translation.english,
                     "important": important,
-                    "important_reason": translation.reason or alerts.get("reason"),
                     "alerts": alerts,
                 }
             )
+            important_reason = _important_reason(translation.reason, alerts) if important else None
+            if important_reason:
+                document["important_reason"] = important_reason
             if self._should_send_translation(chat_settings, important):
                 await self._send_translation(chat_title, sender_name, text, translation.english, alerts)
                 logger.info("Sent translation chat_id=%s message_id=%s", chat_id, message.id)
@@ -434,3 +442,26 @@ def _message_for_ai(message: dict[str, Any]) -> dict[str, Any]:
         "important": message.get("important"),
         "alerts": message.get("alerts"),
     }
+
+
+def _compact_alerts(alerts: dict[str, Any]) -> dict[str, bool]:
+    return {
+        "name_mention": bool(alerts.get("name_mention")),
+        "question_or_request": bool(alerts.get("question_or_request")),
+        "urgent": bool(alerts.get("urgent")),
+    }
+
+
+def _important_reason(reason: str | None, alerts: dict[str, bool]) -> str | None:
+    if reason:
+        return reason
+    active_alerts = []
+    if alerts.get("name_mention"):
+        active_alerts.append("name mention")
+    if alerts.get("question_or_request"):
+        active_alerts.append("question/request")
+    if alerts.get("urgent"):
+        active_alerts.append("urgent")
+    if not active_alerts:
+        return None
+    return "Alert: " + ", ".join(active_alerts)
