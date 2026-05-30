@@ -42,6 +42,7 @@ class TelegramTranslatorApp:
         self.scheduler = SummaryScheduler(settings)
         self.config_watcher: ConfigWatcher | None = None
         self.loop: asyncio.AbstractEventLoop | None = None
+        self.chat_title_cache: dict[str, str] = {}
 
     async def run(self) -> None:
         self.loop = asyncio.get_running_loop()
@@ -110,15 +111,19 @@ class TelegramTranslatorApp:
         chat = await message.get_chat()
         sender = await message.get_sender()
         chat_title = get_display_name(chat) or str(chat_id)
+        chat_title_translation = self.chat_title_cache.get(chat_title)
         sender_name = get_display_name(sender) or str(sender_id)
+        sender_username = getattr(sender, "username", None)
         is_chinese = contains_chinese(text)
 
         document = {
             "chat_id": chat_id,
             "chat_title": chat_title,
+            "chat_title_translation": chat_title_translation,
             "message_id": message.id,
             "sender_id": sender_id,
             "sender_name": sender_name,
+            "sender_username": sender_username,
             "text": text,
             "date": message.date.astimezone(UTC) if message.date else datetime.now(UTC),
             "contains_chinese": is_chinese,
@@ -128,28 +133,38 @@ class TelegramTranslatorApp:
         }
 
         if is_chinese:
-            logger.info("Translating Chinese message chat_id=%s message_id=%s", chat_id, message.id)
-            translation = await self.ai.translate(text, chat_title=chat_title, sender_name=sender_name)
-            alerts = await self.ai.analyze_alerts(text, sender_name=sender_name, chat_title=chat_title)
-            alerts = _compact_alerts(alerts)
-            important = (
-                translation.important
-                or bool(alerts.get("name_mention"))
-                or bool(alerts.get("question_or_request"))
-                or bool(alerts.get("urgent"))
+            logger.info("Analyzing Chinese message chat_id=%s message_id=%s", chat_id, message.id)
+            analysis = await self.ai.analyze_message(
+                text,
+                chat_title=chat_title,
+                sender_name=sender_name,
+                known_chat_title_english=chat_title_translation,
             )
+            chat_title_translation = analysis.chat_title_english
+            self.chat_title_cache[chat_title] = chat_title_translation
+            alerts = analysis.alerts
+            important = analysis.important
             document.update(
                 {
-                    "translation": translation.english,
+                    "chat_title_translation": chat_title_translation,
+                    "translation": analysis.message_english,
                     "important": important,
                     "alerts": alerts,
                 }
             )
-            important_reason = _important_reason(translation.reason, alerts) if important else None
+            important_reason = _important_reason(analysis.reason, alerts) if important else None
             if important_reason:
                 document["important_reason"] = important_reason
             if self._should_send_translation(chat_settings, important):
-                await self._send_translation(chat_title, sender_name, text, translation.english, alerts)
+                await self._send_translation(
+                    chat_title,
+                    chat_title_translation,
+                    sender_name,
+                    sender_username,
+                    text,
+                    analysis.message_english,
+                    important=important,
+                )
                 logger.info("Sent translation chat_id=%s message_id=%s", chat_id, message.id)
         else:
             logger.info("Stored non-Chinese message chat_id=%s message_id=%s", chat_id, message.id)
@@ -168,19 +183,23 @@ class TelegramTranslatorApp:
     async def _send_translation(
         self,
         chat_title: str,
+        chat_title_translation: str | None,
         sender_name: str,
+        sender_username: str | None,
         original: str,
         translation: str,
-        alerts: dict[str, Any],
+        important: bool = False,
     ) -> None:
         include_original = self.settings.features.original_plus_translation
         message = format_translation(
             chat_title=chat_title,
+            chat_title_translation=chat_title_translation,
             sender_name=sender_name,
+            sender_username=sender_username,
             original=original,
             translation=translation,
             include_original=include_original,
-            alerts=alerts,
+            important=important,
         )
         await self._send_to_destination(self.settings.telegram.send_translations_to_chat_id, message)
 
@@ -251,16 +270,36 @@ class TelegramTranslatorApp:
             for chat_id in watched_ids:
                 messages = await self.storage.recent_messages(chat_id=chat_id, since=since, limit=250)
                 chat_name = self.settings.chat_for(chat_id).name if self.settings.chat_for(chat_id) else str(chat_id)
-                await self._summarize_and_send(messages, f"{period.title()} Summary: {chat_name}")
+                chat_name_translation = _chat_title_translation_from_messages(messages)
+                if chat_name_translation:
+                    self.chat_title_cache[chat_name] = chat_name_translation
+                await self._summarize_and_send(
+                    messages,
+                    f"{period.title()} Summary",
+                    chat_name=chat_name,
+                    chat_name_translation=chat_name_translation,
+                )
 
         await self.storage.set_last_summary_time(key, now)
 
-    async def _summarize_and_send(self, messages: list[dict[str, Any]], title: str) -> None:
+    async def _summarize_and_send(
+        self,
+        messages: list[dict[str, Any]],
+        title: str,
+        chat_name: str | None = None,
+        chat_name_translation: str | None = None,
+    ) -> None:
         if not messages:
             return
         payload = [_message_for_ai(message) for message in messages]
         summary = await self.ai.summarize(payload, title=title)
-        formatted = format_summary(title, summary, datetime.now(UTC))
+        formatted = format_summary(
+            title,
+            summary,
+            datetime.now(UTC),
+            chat_name=chat_name,
+            chat_name_translation=chat_name_translation,
+        )
         await self._send_to_destination(self.settings.telegram.send_summaries_to_chat_id, formatted)
 
     async def _send_to_destination(self, destination: str | int, text: str) -> None:
@@ -445,8 +484,12 @@ async def list_dialogs(client: TelegramClient) -> list[str]:
 
 
 def _message_for_ai(message: dict[str, Any]) -> dict[str, Any]:
+    chat_title = str(message.get("chat_title") or "")
+    chat_title_translation = message.get("chat_title_translation")
     return {
-        "chat": message.get("chat_title"),
+        "chat": chat_title,
+        "chat_translation": chat_title_translation,
+        "chat_display": _chat_display_for_summary(chat_title, chat_title_translation),
         "sender": message.get("sender_name"),
         "date": message.get("date"),
         "original": message.get("text"),
@@ -456,12 +499,18 @@ def _message_for_ai(message: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _compact_alerts(alerts: dict[str, Any]) -> dict[str, bool]:
-    return {
-        "name_mention": bool(alerts.get("name_mention")),
-        "question_or_request": bool(alerts.get("question_or_request")),
-        "urgent": bool(alerts.get("urgent")),
-    }
+def _chat_title_translation_from_messages(messages: list[dict[str, Any]]) -> str | None:
+    for message in messages:
+        translation = message.get("chat_title_translation")
+        if translation:
+            return str(translation)
+    return None
+
+
+def _chat_display_for_summary(chat_title: str, chat_title_translation: Any) -> str:
+    if not chat_title_translation or str(chat_title_translation).casefold() == chat_title.casefold():
+        return f"`{chat_title}`"
+    return f"`{chat_title}` / `{chat_title_translation}`"
 
 
 def _important_reason(reason: str | None, alerts: dict[str, bool]) -> str | None:
@@ -469,11 +518,11 @@ def _important_reason(reason: str | None, alerts: dict[str, bool]) -> str | None
         return reason
     active_alerts = []
     if alerts.get("name_mention"):
-        active_alerts.append("name mention")
+        active_alerts.append("Name mention")
     if alerts.get("question_or_request"):
-        active_alerts.append("question/request")
+        active_alerts.append("Question/request")
     if alerts.get("urgent"):
-        active_alerts.append("urgent")
+        active_alerts.append("Urgent")
     if not active_alerts:
         return None
-    return "Alert: " + ", ".join(active_alerts)
+    return ", ".join(active_alerts)

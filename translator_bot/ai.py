@@ -10,9 +10,11 @@ from translator_bot.config import Settings
 
 
 @dataclass(frozen=True)
-class TranslationResult:
-    english: str
+class MessageAnalysisResult:
+    chat_title_english: str
+    message_english: str
     important: bool
+    alerts: dict[str, bool]
     reason: str | None = None
 
 
@@ -21,7 +23,15 @@ class OpenAIService:
         self.settings = settings
         self.client = AsyncOpenAI(api_key=settings.openai.api_key)
 
-    async def translate(self, text: str, *, chat_title: str, sender_name: str) -> TranslationResult:
+    async def analyze_message(
+        self,
+        text: str,
+        *,
+        chat_title: str,
+        sender_name: str,
+        known_chat_title_english: str | None = None,
+    ) -> MessageAnalysisResult:
+        names = self.settings.alerts.names
         response = await self.client.chat.completions.create(
             model=self.settings.openai.translation_model,
             temperature=0.1,
@@ -30,29 +40,56 @@ class OpenAIService:
                 {
                     "role": "system",
                     "content": (
-                        "Translate Chinese chat messages to natural English. "
-                        "Return JSON with keys: english, important, reason. "
-                        "Mark important true for requests, decisions, deadlines, complaints, "
-                        "money/payment, meetings, risks, or urgent messages. "
-                        "For unimportant messages, reason must be null. "
-                        "For important messages, reason must be under 80 characters."
+                        "Analyze one Chinese Telegram message. Return JSON only with keys: "
+                        "chat_title_english, message_english, important, important_reason, alerts. "
+                        "alerts must be an object with booleans: name_mention, question_or_request, urgent. "
+                        "Translate the message into natural English. Translate the chat title into concise English; "
+                        "if known_chat_title_english is provided, reuse it unless clearly wrong. "
+                        "Mark important true for requests, questions, decisions, deadlines, complaints, "
+                        "money/payment, meetings, risks, urgent messages, or watched-name mentions. "
+                        "For unimportant messages, important_reason must be null. "
+                        "For important messages, important_reason must be under 80 characters. "
+                        "Do not include explanations."
                     ),
                 },
                 {
                     "role": "user",
                     "content": json.dumps(
-                        {"chat": chat_title, "sender": sender_name, "message": text},
+                        {
+                            "watched_names": names,
+                            "chat_title": chat_title,
+                            "known_chat_title_english": known_chat_title_english,
+                            "sender": sender_name,
+                            "message": text,
+                        },
                         ensure_ascii=False,
                     ),
                 },
             ],
         )
         data = _json_from_response(response.choices[0].message.content)
-        important = bool(data.get("important", False))
-        reason = str(data["reason"]).strip() if important and data.get("reason") else None
-        return TranslationResult(
-            english=str(data.get("english", "")).strip() or text,
+        alerts = data.get("alerts") if isinstance(data.get("alerts"), dict) else {}
+        compact_alerts = {
+            "name_mention": bool(alerts.get("name_mention")) if self.settings.alerts.name_mentions_enabled else False,
+            "question_or_request": bool(alerts.get("question_or_request"))
+            if self.settings.alerts.question_request_alert
+            else False,
+            "urgent": bool(alerts.get("urgent")) if self.settings.alerts.urgency_alert else False,
+        }
+        important = (
+            bool(data.get("important"))
+            or compact_alerts["name_mention"]
+            or compact_alerts["question_or_request"]
+            or compact_alerts["urgent"]
+        )
+        reason = str(data["important_reason"]).strip() if important and data.get("important_reason") else None
+        return MessageAnalysisResult(
+            chat_title_english=str(data.get("chat_title_english", "")).strip()
+            or known_chat_title_english
+            or chat_title,
+            message_english=str(data.get("message_english", "")).strip() or text,
             important=important,
+            alerts=compact_alerts,
             reason=_short_text(reason, 80),
         )
 
@@ -73,45 +110,6 @@ class OpenAIService:
         )
         return response.choices[0].message.content or ""
 
-    async def analyze_alerts(self, text: str, *, sender_name: str, chat_title: str) -> dict[str, Any]:
-        names = self.settings.alerts.names
-        response = await self.client.chat.completions.create(
-            model=self.settings.openai.alert_model,
-            temperature=0,
-            response_format={"type": "json_object"},
-            messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        "Analyze a Telegram message. Return JSON with booleans: "
-                        "name_mention, question_or_request, urgent. "
-                        "Do not include explanations or reason fields. "
-                        "Only set true when the signal is clear."
-                    ),
-                },
-                {
-                    "role": "user",
-                    "content": json.dumps(
-                        {
-                            "watched_names": names,
-                            "chat": chat_title,
-                            "sender": sender_name,
-                            "message": text,
-                        },
-                        ensure_ascii=False,
-                    ),
-                },
-            ],
-        )
-        data = _json_from_response(response.choices[0].message.content)
-        return {
-            "name_mention": bool(data.get("name_mention")) if self.settings.alerts.name_mentions_enabled else False,
-            "question_or_request": bool(data.get("question_or_request"))
-            if self.settings.alerts.question_request_alert
-            else False,
-            "urgent": bool(data.get("urgent")) if self.settings.alerts.urgency_alert else False,
-        }
-
     async def summarize(self, messages: list[dict[str, Any]], *, title: str) -> str:
         if not messages:
             return "No messages to summarize."
@@ -123,9 +121,15 @@ class OpenAIService:
                 {
                     "role": "system",
                     "content": (
-                        "Summarize Telegram chat messages in concise English bullets. Include: "
-                        "1) key points, 2) decisions, 3) action items, 4) questions/requests, "
-                        "5) meetings/events/deadlines, 6) urgent or risky items. "
+                        "Summarize Telegram chat messages in concise English. "
+                        "Use exactly these emoji section headings when relevant: "
+                        "🔑 Key Points, ✅ Decisions, 📌 Action Items, ❓ Questions/Requests, "
+                        "📅 Meetings/Events/Deadlines, ⚠️ Urgent or Risky Items. "
+                        "Use short bullets under each heading. End every non-empty bullet with "
+                        "the source chat display in parentheses, wrapping chat names with backticks. "
+                        "Use the provided chat_display field exactly as-is when available, for example: "
+                        "'- Backend support can wait until tomorrow. (`技术群` / `Tech Group`)' "
+                        "If a section has no useful content, write '- None mentioned.' "
                         "Ignore small talk unless it changes the situation."
                     ),
                 },

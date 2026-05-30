@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from datetime import datetime
 from html import escape
-from typing import Any
 
 
 MAX_TELEGRAM_MESSAGE_LENGTH = 3900
@@ -34,31 +33,44 @@ def split_telegram_message(text: str, limit: int = MAX_TELEGRAM_MESSAGE_LENGTH) 
 def format_translation(
     *,
     chat_title: str,
+    chat_title_translation: str | None,
     sender_name: str,
+    sender_username: str | None,
     original: str,
     translation: str,
     include_original: bool,
-    alerts: dict[str, Any] | None = None,
+    important: bool = False,
 ) -> str:
-    alert_lines = []
-    if alerts:
-        if alerts.get("name_mention"):
-            alert_lines.append("Name mention")
-        if alerts.get("question_or_request"):
-            alert_lines.append("Question/request")
-        if alerts.get("urgent"):
-            alert_lines.append("Urgent")
+    sender = f"<code>{escape(sender_name)}</code>"
+    if sender_username:
+        sender = f"{sender} (@{escape(sender_username)})"
+
+    chat = _format_chat_name(chat_title, chat_title_translation)
     parts = [
-        f"Chat: {escape(chat_title)}",
-        f"From: {escape(sender_name)}",
+        f"{'⚠️ ' if important else ''}{chat}",
+        f"👤 {sender}",
     ]
-    if alert_lines:
-        parts.append(f"Alerts: {', '.join(alert_lines)}")
     if include_original:
-        parts.extend(["", escape(original)])
-    parts.extend(["", escape(translation)])
+        parts.extend(["", f"🇨🇳 {escape(original)}"])
+    parts.extend(["", f"🇬🇧 {escape(translation)}"])
     return "\n".join(part for part in parts if part != "")
 
 
-def format_summary(title: str, body: str, generated_at: datetime) -> str:
-    return f"<b>{escape(title)}</b>\nGenerated: {generated_at:%Y-%m-%d %H:%M UTC}\n\n{escape(body)}"
+def format_summary(
+    title: str,
+    body: str,
+    generated_at: datetime,
+    chat_name: str | None = None,
+    chat_name_translation: str | None = None,
+) -> str:
+    header = f"📝 <b>{escape(title)}</b>"
+    if chat_name:
+        header = f"{header} {_format_chat_name(chat_name, chat_name_translation)}"
+    return f"{header}\n🕒 {generated_at:%Y-%m-%d %H:%M UTC}\n\n{escape(body)}"
+
+
+def _format_chat_name(chat_name: str, chat_name_translation: str | None) -> str:
+    original = f"<code>{escape(chat_name)}</code>"
+    if not chat_name_translation or chat_name_translation.casefold() == chat_name.casefold():
+        return original
+    return f"{original} / <code>{escape(chat_name_translation)}</code>"
