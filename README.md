@@ -85,26 +85,26 @@ docker compose logs -f bot
 
 Send these commands to the Telegram bot from user B's account or configured `control_chat_id`:
 
-- `/list-chats`
-- `/reload-config`
-- `/config-status`
-- `/test-send`
+- `/list_chats`
+- `/reload_config`
+- `/config_status`
+- `/test_send`
 - `/summary`
 - `/summary all`
 - `/summary <chat_id>`
-- `/translate-last`
-- `/translate-last <count>`
-- `/translate-last <chat_id> <count>`
+- `/translate_last`
+- `/translate_last <count>`
+- `/translate_last <chat_id> <count>`
 - `/mute <chat_id>`
 - `/unmute <chat_id>`
 - `/enable <chat_id>`
 - `/disable <chat_id>`
-- `/important-only <chat_id> on`
-- `/important-only <chat_id> off`
-- `/ignored-users`
-- `/ignore-user <user_id>`
-- `/unignore-user <user_id>`
-- `/ignored-chats`
-- `/ignore-chat <chat_id>`
-- `/unignore-chat <chat_id>`
+- `/important_only <chat_id> on`
+- `/important_only <chat_id> off`
+- `/ignored_users`
+- `/ignore_user <user_id>`
+- `/unignore_user <user_id>`
+- `/ignored_chats`
+- `/ignore_chat <chat_id>`
+- `/unignore_chat <chat_id>`
 - `/help`

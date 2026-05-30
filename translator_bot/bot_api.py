@@ -24,10 +24,20 @@ def send_bot_message_sync(bot_token: str, chat_id: int | str, text: str, *, pars
     _bot_api_request(bot_token, "sendMessage", data=data)
 
 
+def set_bot_commands_sync(bot_token: str, commands: list[dict[str, str]]) -> None:
+    _bot_api_request(bot_token, "setMyCommands", data={"commands": json.dumps(commands)})
+
+
 async def send_bot_message(bot_token: str, chat_id: int | str, text: str, *, parse_mode: str | None = None) -> None:
     import asyncio
 
     await asyncio.to_thread(send_bot_message_sync, bot_token, chat_id, text, parse_mode=parse_mode)
+
+
+async def set_bot_commands(bot_token: str, commands: list[dict[str, str]]) -> None:
+    import asyncio
+
+    await asyncio.to_thread(set_bot_commands_sync, bot_token, commands)
 
 
 def _bot_api_request(bot_token: str, method: str, data: dict[str, Any] | None = None) -> dict[str, Any]:

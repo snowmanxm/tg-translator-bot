@@ -5,13 +5,14 @@ import logging
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from telethon import TelegramClient, events
 from telethon.tl.custom.message import Message
 from telethon.utils import get_display_name
 
 from translator_bot.ai import OpenAIService
-from translator_bot.bot_api import send_bot_message
+from translator_bot.bot_api import send_bot_message, set_bot_commands
 from translator_bot.config import ChatSettings, Settings, load_settings
 from translator_bot.config_watcher import ConfigWatcher
 from translator_bot.formatting import format_summary, format_translation, split_telegram_message
@@ -60,6 +61,7 @@ class TelegramTranslatorApp:
 
         await self.client.start()
         await self.bot_client.start(bot_token=self.settings.telegram.bot_token)
+        await self._setup_bot_commands()
         logger.info("Telegram watcher and sender bot started")
         try:
             await self._send_to_destination(
@@ -212,31 +214,32 @@ class TelegramTranslatorApp:
             return
 
         parts = text.split()
-        command = parts[0].removeprefix(prefix).replace("_", "-").lower()
+        command = parts[0].removeprefix(prefix).replace("-", "_").lower()
         args = parts[1:]
         handlers = {
+            "start": self._cmd_help,
             "help": self._cmd_help,
-            "list-chats": self._cmd_list_chats,
+            "list_chats": self._cmd_list_chats,
             "chats": self._cmd_list_chats,
-            "reload-config": self._cmd_reload_config,
+            "reload_config": self._cmd_reload_config,
             "reload": self._cmd_reload_config,
-            "config-status": self._cmd_config_status,
+            "config_status": self._cmd_config_status,
             "status": self._cmd_config_status,
-            "test-send": self._cmd_test_send,
+            "test_send": self._cmd_test_send,
             "summary": self._cmd_summary,
-            "translate-last": self._cmd_translate_last,
+            "translate_last": self._cmd_translate_last,
             "tlast": self._cmd_translate_last,
             "mute": self._cmd_mute,
             "unmute": self._cmd_unmute,
             "enable": self._cmd_enable,
             "disable": self._cmd_disable,
-            "important-only": self._cmd_important_only,
-            "ignored-users": self._cmd_ignored_users,
-            "ignore-user": self._cmd_ignore_user,
-            "unignore-user": self._cmd_unignore_user,
-            "ignored-chats": self._cmd_ignored_chats,
-            "ignore-chat": self._cmd_ignore_chat,
-            "unignore-chat": self._cmd_unignore_chat,
+            "important_only": self._cmd_important_only,
+            "ignored_users": self._cmd_ignored_users,
+            "ignore_user": self._cmd_ignore_user,
+            "unignore_user": self._cmd_unignore_user,
+            "ignored_chats": self._cmd_ignored_chats,
+            "ignore_chat": self._cmd_ignore_chat,
+            "unignore_chat": self._cmd_unignore_chat,
         }
         handler = handlers.get(command)
         if handler is None:
@@ -293,14 +296,32 @@ class TelegramTranslatorApp:
             return
         payload = [_message_for_ai(message) for message in messages]
         summary = await self.ai.summarize(payload, title=title)
+        summary_timezone = ZoneInfo(self.settings.summary.timezone)
         formatted = format_summary(
             title,
             summary,
-            datetime.now(UTC),
+            datetime.now(summary_timezone),
             chat_name=chat_name,
             chat_name_translation=chat_name_translation,
+            timezone_name=self.settings.summary.timezone,
         )
         await self._send_to_destination(self.settings.telegram.send_summaries_to_chat_id, formatted)
+
+    async def _setup_bot_commands(self) -> None:
+        await set_bot_commands(
+            self.settings.telegram.bot_token,
+            [
+                {"command": "help", "description": "Show available commands"},
+                {"command": "list_chats", "description": "List watcher account chats"},
+                {"command": "config_status", "description": "Show active config summary"},
+                {"command": "reload_config", "description": "Reload config.yaml"},
+                {"command": "test_send", "description": "Send test messages"},
+                {"command": "summary", "description": "Generate a manual summary"},
+                {"command": "translate_last", "description": "Translate recent stored messages"},
+                {"command": "ignored_users", "description": "List ignored users"},
+                {"command": "ignored_chats", "description": "List ignored chats"},
+            ],
+        )
 
     async def _send_to_destination(self, destination: str | int, text: str) -> None:
         if isinstance(destination, str) and destination.strip().lstrip("-").isdigit():
@@ -310,7 +331,11 @@ class TelegramTranslatorApp:
 
     def _schedule_config_reload(self) -> None:
         if self.loop:
-            self.loop.call_soon_threadsafe(lambda: asyncio.create_task(self.reload_config()))
+            self.loop.call_soon_threadsafe(lambda: asyncio.create_task(self._reload_config_from_watcher()))
+
+    async def _reload_config_from_watcher(self) -> None:
+        result = await self.reload_config()
+        await self._send_to_destination(self.settings.telegram.send_translations_to_chat_id, result)
 
     async def reload_config(self) -> str:
         new_settings = load_settings(self.config_path)
@@ -334,16 +359,15 @@ class TelegramTranslatorApp:
             daily_job=self.send_daily_summaries,
             prune_job=self.storage.prune_old_messages,
         )
-        await self._send_to_destination(self.settings.telegram.send_translations_to_chat_id, "Config reloaded successfully.")
         return "Config reloaded successfully."
 
     async def _cmd_help(self, args: list[str], message: Message) -> str:
         return (
-            "/list-chats\n/reload-config\n/config-status\n/test-send\n"
-            "/summary [all|chat_id]\n/translate-last [count]|[chat_id count]\n"
+            "/list_chats\n/reload_config\n/config_status\n/test_send\n"
+            "/summary [all|chat_id]\n/translate_last [count]|[chat_id count]\n"
             "/mute <chat_id>\n/unmute <chat_id>\n/enable <chat_id>\n/disable <chat_id>\n"
-            "/important-only <chat_id> on|off\n/ignored-users\n/ignore-user <user_id>\n"
-            "/unignore-user <user_id>\n/ignored-chats\n/ignore-chat <chat_id>\n/unignore-chat <chat_id>"
+            "/important_only <chat_id> on|off\n/ignored_users\n/ignore_user <user_id>\n"
+            "/unignore_user <user_id>\n/ignored_chats\n/ignore_chat <chat_id>\n/unignore_chat <chat_id>"
         )
 
     async def _cmd_list_chats(self, args: list[str], message: Message) -> str:
@@ -393,11 +417,11 @@ class TelegramTranslatorApp:
         if len(args) == 0:
             chat_id, count = int(message.chat_id or 0), 10
             if not self.settings.chat_for(chat_id):
-                return "Usage from bot chat: /translate-last <watched_chat_id> <count>"
+                return "Usage from bot chat: /translate_last <watched_chat_id> <count>"
         elif len(args) == 1:
             chat_id, count = int(message.chat_id or 0), int(args[0])
             if not self.settings.chat_for(chat_id):
-                return "Usage from bot chat: /translate-last <watched_chat_id> <count>"
+                return "Usage from bot chat: /translate_last <watched_chat_id> <count>"
         else:
             chat_id, count = int(args[0]), int(args[1])
         rows = await self.storage.last_messages_for_chat(chat_id, min(count, 50))
@@ -430,7 +454,7 @@ class TelegramTranslatorApp:
 
     async def _cmd_important_only(self, args: list[str], message: Message) -> str:
         if len(args) < 2:
-            return "Usage: /important-only <chat_id> on|off"
+            return "Usage: /important_only <chat_id> on|off"
         chat = self._get_or_add_chat(int(args[0]))
         chat.important_only = args[1].lower() == "on"
         return f"Important-only for {chat.id}: {chat.important_only}"

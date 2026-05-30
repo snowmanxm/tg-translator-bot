@@ -62,11 +62,12 @@ def format_summary(
     generated_at: datetime,
     chat_name: str | None = None,
     chat_name_translation: str | None = None,
+    timezone_name: str = "UTC",
 ) -> str:
     header = f"📝 <b>{escape(title)}</b>"
     if chat_name:
         header = f"{header} {_format_chat_name(chat_name, chat_name_translation)}"
-    return f"{header}\n🕒 {generated_at:%Y-%m-%d %H:%M UTC}\n\n{escape(body)}"
+    return f"{header}\n🕒 {generated_at:%Y-%m-%d %H:%M} {escape(timezone_name)}\n\n{escape(body)}"
 
 
 def _format_chat_name(chat_name: str, chat_name_translation: str | None) -> str:
