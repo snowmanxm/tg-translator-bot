@@ -11,7 +11,6 @@ from translator_bot.config import Settings
 
 @dataclass(frozen=True)
 class MessageAnalysisResult:
-    chat_title_english: str
     message_english: str
     important: bool
     alerts: dict[str, bool]
@@ -30,7 +29,6 @@ class OpenAIService:
         chat_title: str,
         sender_name: str,
         protected_placeholders: list[dict[str, str | None]] | None = None,
-        known_chat_title_english: str | None = None,
     ) -> MessageAnalysisResult:
         names = self.settings.alerts.names
         response = await self.client.chat.completions.create(
@@ -42,10 +40,9 @@ class OpenAIService:
                     "role": "system",
                     "content": (
                         "Analyze one Chinese Telegram message. Return JSON only with keys: "
-                        "chat_title_english, message_english, important, important_reason, alerts. "
+                        "message_english, important, important_reason, alerts. "
                         "alerts must be an object with booleans: name_mention, question_or_request, urgent. "
-                        "Translate the message into natural English. Translate the chat title into concise English; "
-                        "if known_chat_title_english is provided, reuse it unless clearly wrong. "
+                        "Translate the message into natural English. "
                         "The message may contain protected placeholders like XM_PROTECTED_SEGMENT_0. "
                         "Copy placeholders exactly into message_english where they belong. "
                         "Never translate, remove, duplicate, wrap, indent, or modify placeholders. "
@@ -64,7 +61,6 @@ class OpenAIService:
                         {
                             "watched_names": names,
                             "chat_title": chat_title,
-                            "known_chat_title_english": known_chat_title_english,
                             "sender": sender_name,
                             "message": text,
                             "protected_placeholders": protected_placeholders or [],
@@ -91,14 +87,63 @@ class OpenAIService:
         )
         reason = str(data["important_reason"]).strip() if important and data.get("important_reason") else None
         return MessageAnalysisResult(
-            chat_title_english=str(data.get("chat_title_english", "")).strip()
-            or known_chat_title_english
-            or chat_title,
             message_english=str(data.get("message_english", "")).strip() or text,
             important=important,
             alerts=compact_alerts,
             reason=_short_text(reason, 80),
         )
+
+    async def update_chat_memory(
+        self,
+        *,
+        chat_title: str,
+        previous_memory: dict[str, Any] | None,
+        recent_messages: list[dict[str, Any]],
+        summary: str,
+    ) -> dict[str, Any]:
+        response = await self.client.chat.completions.create(
+            model=self.settings.openai.summary_model,
+            temperature=0.1,
+            response_format={"type": "json_object"},
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "Update durable memory for one Telegram chat. Return JSON only with keys: "
+                        "chat_title_translation, summary, topics, people, open_items, preferences_or_terms. "
+                        "Translate the chat title to concise natural English. Keep memory compact and durable. "
+                        "Preserve useful previous context, add new important context, and remove resolved or stale items. "
+                        "Do not store small talk or one-off details unless they affect ongoing work. "
+                        "people must be an array of objects with name, username, role_or_context. "
+                        "topics, open_items, and preferences_or_terms must be arrays of short strings."
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": json.dumps(
+                        {
+                            "chat_title": chat_title,
+                            "previous_memory": previous_memory or {},
+                            "recent_messages": recent_messages,
+                            "generated_summary": summary,
+                        },
+                        ensure_ascii=False,
+                        default=str,
+                    ),
+                },
+            ],
+        )
+        data = _json_from_response(response.choices[0].message.content)
+        return {
+            "chat_title_translation": str(data.get("chat_title_translation", "")).strip() or chat_title,
+            "memory": {
+                "summary": str(data.get("summary", "")).strip(),
+                "topics": _string_list(data.get("topics")),
+                "people": _people_list(data.get("people")),
+                "open_items": _string_list(data.get("open_items")),
+                "preferences_or_terms": _string_list(data.get("preferences_or_terms")),
+            },
+        }
 
     async def translate_batch(self, messages: list[dict[str, Any]]) -> str:
         response = await self.client.chat.completions.create(
@@ -170,3 +215,29 @@ def _short_text(value: str | None, limit: int) -> str | None:
     if len(value) <= limit:
         return value
     return value[: limit - 3].rstrip() + "..."
+
+
+def _string_list(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [str(item).strip() for item in value if str(item).strip()]
+
+
+def _people_list(value: Any) -> list[dict[str, str | None]]:
+    if not isinstance(value, list):
+        return []
+    people: list[dict[str, str | None]] = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name", "")).strip()
+        if not name:
+            continue
+        people.append(
+            {
+                "name": name,
+                "username": str(item["username"]).strip() if item.get("username") else None,
+                "role_or_context": str(item["role_or_context"]).strip() if item.get("role_or_context") else None,
+            }
+        )
+    return people

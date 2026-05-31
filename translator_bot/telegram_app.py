@@ -53,7 +53,6 @@ class TelegramTranslatorApp:
         self.scheduler = SummaryScheduler(settings)
         self.config_watcher: ConfigWatcher | None = None
         self.loop: asyncio.AbstractEventLoop | None = None
-        self.chat_title_cache: dict[str, str] = {}
 
     async def run(self) -> None:
         self.loop = asyncio.get_running_loop()
@@ -128,22 +127,22 @@ class TelegramTranslatorApp:
         chat = await message.get_chat()
         sender = await message.get_sender()
         chat_title = get_display_name(chat) or str(chat_id)
-        chat_title_translation = self.chat_title_cache.get(chat_title)
+        chat_memory = await self.storage.get_chat_memory(chat_id)
+        chat_title_translation = _chat_title_translation_from_memory(chat_memory)
         sender_name = get_display_name(sender) or str(sender_id)
         sender_username = getattr(sender, "username", None)
         is_chinese = contains_chinese(text)
+        message_date = message.date.astimezone(UTC) if message.date else datetime.now(UTC)
 
         document = {
             "chat_id": chat_id,
-            "chat_title": chat_title,
-            "chat_title_translation": chat_title_translation,
             "message_id": message.id,
             "sender_id": sender_id,
             "sender_name": sender_name,
             "sender_username": sender_username,
             "text": text,
             "attachment": attachment,
-            "date": message.date.astimezone(UTC) if message.date else datetime.now(UTC),
+            "date": message_date,
             "contains_chinese": is_chinese,
             "translation": None,
             "important": False,
@@ -157,16 +156,12 @@ class TelegramTranslatorApp:
                 chat_title=chat_title,
                 sender_name=sender_name,
                 protected_placeholders=protected_segments_for_ai(protected_segments),
-                known_chat_title_english=chat_title_translation,
             )
             translation = restore_protected_segments(analysis.message_english, protected_segments, append_missing=True)
-            chat_title_translation = analysis.chat_title_english
-            self.chat_title_cache[chat_title] = chat_title_translation
             alerts = analysis.alerts
             important = analysis.important
             document.update(
                 {
-                    "chat_title_translation": chat_title_translation,
                     "translation": translation,
                     "important": important,
                     "alerts": alerts,
@@ -204,6 +199,12 @@ class TelegramTranslatorApp:
                 )
 
         await self.storage.save_message(document)
+        await self.storage.touch_chat_memory_metadata(
+            chat_id=chat_id,
+            chat_title=chat_title,
+            last_message_id=message.id,
+            last_message_at=message_date,
+        )
 
     def _should_send_translation(self, chat_settings: ChatSettings, important: bool) -> bool:
         if not self.settings.features.instant_translation:
@@ -315,20 +316,27 @@ class TelegramTranslatorApp:
         if self.settings.summary.combined_summary:
             messages = await self.storage.recent_messages(since=since, limit=500)
             messages = [msg for msg in messages if msg["chat_id"] in watched_ids]
-            await self._summarize_and_send(messages, f"{period.title()} Combined Summary")
+            chat_memories = await self.storage.get_chat_memories(watched_ids)
+            await self._summarize_and_send(
+                messages,
+                f"{period.title()} Combined Summary",
+                chat_memories=chat_memories,
+            )
 
         if self.settings.summary.per_chat_summary:
             for chat_id in watched_ids:
                 messages = await self.storage.recent_messages(chat_id=chat_id, since=since, limit=250)
-                chat_name = self.settings.chat_for(chat_id).name if self.settings.chat_for(chat_id) else str(chat_id)
-                chat_name_translation = _chat_title_translation_from_messages(messages)
-                if chat_name_translation:
-                    self.chat_title_cache[chat_name] = chat_name_translation
+                chat_memory = await self.storage.get_chat_memory(chat_id)
+                chat_settings = self.settings.chat_for(chat_id)
+                chat_name = _chat_title_from_memory(chat_memory) or (chat_settings.name if chat_settings else str(chat_id))
+                chat_name_translation = _chat_title_translation_from_memory(chat_memory)
                 await self._summarize_and_send(
                     messages,
                     f"{period.title()} Summary",
                     chat_name=chat_name,
                     chat_name_translation=chat_name_translation,
+                    chat_memories={chat_id: chat_memory} if chat_memory else {},
+                    update_memory=True,
                 )
 
         await self.storage.set_last_summary_time(key, now)
@@ -339,11 +347,17 @@ class TelegramTranslatorApp:
         title: str,
         chat_name: str | None = None,
         chat_name_translation: str | None = None,
+        chat_memories: dict[int, dict[str, Any]] | None = None,
+        update_memory: bool = False,
     ) -> None:
         if not messages:
             return
-        payload = [_message_for_ai(message) for message in messages]
+        payload = [_message_for_ai(message, chat_memories or {}) for message in messages]
         summary = await self.ai.summarize(payload, title=title)
+        if update_memory:
+            updated_memory = await self._update_chat_memory_from_summary(messages, summary)
+            chat_name = chat_name or _chat_title_from_memory(updated_memory)
+            chat_name_translation = chat_name_translation or _chat_title_translation_from_memory(updated_memory)
         summary_timezone = ZoneInfo(self.settings.summary.timezone)
         formatted = format_summary(
             title,
@@ -354,6 +368,37 @@ class TelegramTranslatorApp:
             timezone_name=self.settings.summary.timezone,
         )
         await self._send_to_destination(self.settings.telegram.send_summaries_to_chat_id, formatted)
+
+    async def _update_chat_memory_from_summary(self, messages: list[dict[str, Any]], summary: str) -> dict[str, Any] | None:
+        if not messages:
+            return None
+        chat_id = int(messages[0]["chat_id"])
+        previous = await self.storage.get_chat_memory(chat_id)
+        chat_title = _chat_title_from_memory(previous) or str(chat_id)
+        payload = [_message_for_ai(message, {chat_id: previous} if previous else {}) for message in messages]
+        update = await self.ai.update_chat_memory(
+            chat_title=chat_title,
+            previous_memory=previous.get("memory") if previous else None,
+            recent_messages=payload,
+            summary=summary,
+        )
+        now = datetime.now(UTC)
+        last_message = messages[-1]
+        document = {
+            "chat_id": chat_id,
+            "chat_title": chat_title,
+            "chat_title_translation": update["chat_title_translation"],
+            "memory": update["memory"],
+            "stats": {
+                "message_count_seen": previous.get("stats", {}).get("message_count_seen", len(messages)) if previous else len(messages),
+                "last_message_id": last_message.get("message_id"),
+                "last_message_at": last_message.get("date"),
+                "last_memory_update_at": now,
+            },
+            "updated_at": now,
+        }
+        await self.storage.upsert_chat_memory(document)
+        return document
 
     async def _setup_bot_commands(self) -> None:
         await set_bot_commands(
@@ -504,7 +549,8 @@ class TelegramTranslatorApp:
                 title = "Manual Combined Summary"
         if not messages:
             return "No recent stored messages found."
-        payload = [_message_for_ai(row) for row in messages]
+        chat_memories = await self.storage.get_chat_memories(list({int(row["chat_id"]) for row in messages}))
+        payload = [_message_for_ai(row, chat_memories) for row in messages]
         return await self.ai.summarize(payload, title=title)
 
     async def _cmd_translate_last(self, args: list[str], message: Message) -> str:
@@ -521,7 +567,8 @@ class TelegramTranslatorApp:
         rows = await self.storage.last_messages_for_chat(chat_id, min(count, 50))
         if not rows:
             return "No stored messages found for that chat."
-        payload = [_message_for_ai(row) for row in rows if row.get("contains_chinese")]
+        chat_memory = await self.storage.get_chat_memory(chat_id)
+        payload = [_message_for_ai(row, {chat_id: chat_memory} if chat_memory else {}) for row in rows if row.get("contains_chinese")]
         if not payload:
             return "No Chinese messages found in that range."
         return await self.ai.translate_batch(payload)
@@ -601,9 +648,11 @@ async def list_dialogs(client: TelegramClient) -> list[str]:
     return rows
 
 
-def _message_for_ai(message: dict[str, Any]) -> dict[str, Any]:
-    chat_title = str(message.get("chat_title") or "")
-    chat_title_translation = message.get("chat_title_translation")
+def _message_for_ai(message: dict[str, Any], chat_memories: dict[int, dict[str, Any]]) -> dict[str, Any]:
+    chat_id = int(message["chat_id"])
+    chat_memory = chat_memories.get(chat_id)
+    chat_title = _chat_title_from_memory(chat_memory) or str(chat_id)
+    chat_title_translation = _chat_title_translation_from_memory(chat_memory)
     return {
         "chat": chat_title,
         "chat_translation": chat_title_translation,
@@ -618,11 +667,19 @@ def _message_for_ai(message: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _chat_title_translation_from_messages(messages: list[dict[str, Any]]) -> str | None:
-    for message in messages:
-        translation = message.get("chat_title_translation")
-        if translation:
-            return str(translation)
+def _chat_title_from_memory(chat_memory: dict[str, Any] | None) -> str | None:
+    if not chat_memory:
+        return None
+    title = chat_memory.get("chat_title")
+    return str(title) if title else None
+
+
+def _chat_title_translation_from_memory(chat_memory: dict[str, Any] | None) -> str | None:
+    if not chat_memory:
+        return None
+    translation = chat_memory.get("chat_title_translation")
+    if translation:
+        return str(translation)
     return None
 
 

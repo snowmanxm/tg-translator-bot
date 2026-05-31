@@ -14,12 +14,14 @@ class MongoStorage:
         self.client = AsyncIOMotorClient(settings.mongodb.uri)
         self.db: AsyncIOMotorDatabase = self.client.get_default_database()
         self.messages = self.db["messages"]
+        self.chat_memories = self.db["chat_memories"]
         self.runtime = self.db["runtime"]
 
     async def setup(self) -> None:
         await self.messages.create_index([("chat_id", 1), ("date", -1)])
         await self.messages.create_index([("message_id", 1), ("chat_id", 1)], unique=True)
         await self.messages.create_index("date")
+        await self.chat_memories.create_index("chat_id", unique=True)
         await self.runtime.create_index("key", unique=True)
 
     async def close(self) -> None:
@@ -55,6 +57,64 @@ class MongoStorage:
         cursor = self.messages.find({"chat_id": chat_id}).sort("date", -1).limit(count)
         rows = await cursor.to_list(length=count)
         return list(reversed(rows))
+
+    async def get_chat_memory(self, chat_id: int) -> dict[str, Any] | None:
+        return await self.chat_memories.find_one({"chat_id": chat_id})
+
+    async def get_chat_memories(self, chat_ids: list[int]) -> dict[int, dict[str, Any]]:
+        if not chat_ids:
+            return {}
+        cursor = self.chat_memories.find({"chat_id": {"$in": chat_ids}})
+        rows = await cursor.to_list(length=len(chat_ids))
+        return {int(row["chat_id"]): row for row in rows}
+
+    async def upsert_chat_memory(self, document: dict[str, Any]) -> None:
+        await self.chat_memories.update_one(
+            {"chat_id": document["chat_id"]},
+            {
+                "$set": document,
+                "$setOnInsert": {"created_at": datetime.now(UTC)},
+            },
+            upsert=True,
+        )
+
+    async def touch_chat_memory_metadata(
+        self,
+        *,
+        chat_id: int,
+        chat_title: str,
+        last_message_id: int | None = None,
+        last_message_at: datetime | None = None,
+    ) -> None:
+        now = datetime.now(UTC)
+        update: dict[str, Any] = {
+            "chat_id": chat_id,
+            "chat_title": chat_title,
+            "updated_at": now,
+        }
+        if last_message_id is not None:
+            update["stats.last_message_id"] = last_message_id
+        if last_message_at is not None:
+            update["stats.last_message_at"] = last_message_at
+        await self.chat_memories.update_one(
+            {"chat_id": chat_id},
+            {
+                "$set": update,
+                "$setOnInsert": {
+                    "created_at": now,
+                    "memory": {
+                        "summary": "",
+                        "topics": [],
+                        "people": [],
+                        "open_items": [],
+                        "preferences_or_terms": [],
+                    },
+                    "stats.message_count_seen": 0,
+                },
+                "$inc": {"stats.message_count_seen": 1},
+            },
+            upsert=True,
+        )
 
     async def prune_old_messages(self) -> int:
         days = self.settings.storage.auto_delete_after_days
