@@ -75,12 +75,20 @@ class AlertSettings(BaseModel):
 class ChatSettings(BaseModel):
     id: int
     name: str | None = None
+    target_bot_chat_id: int | str | None = None
     enabled: bool = True
     instant_translation: bool = True
     summaries: bool = True
     important_only: bool = False
     muted: bool = False
     reply_suggestions: bool | None = None
+
+    @field_validator("target_bot_chat_id", mode="before")
+    @classmethod
+    def parse_numeric_destination(cls, value: Any) -> Any:
+        if isinstance(value, str) and value.strip().lstrip("-").isdigit():
+            return int(value)
+        return value
 
 
 class IgnoreSettings(BaseModel):

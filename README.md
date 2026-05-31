@@ -86,6 +86,7 @@ docker compose logs -f bot
 Send these commands to the Telegram bot from user B's account or configured `control_chat_id`:
 
 - `/list_chats`
+- `/list_bot_chats`
 - `/reload_config`
 - `/config_status`
 - `/test_send`

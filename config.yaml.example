@@ -42,6 +42,7 @@ alerts:
 
 chats:
   - id: -1001111111111
+    target_bot_chat_id: null
     enabled: true
     instant_translation: true
     summaries: true

@@ -14,7 +14,7 @@ from telethon.tl.types import MessageEntityCode, MessageEntityPre
 from telethon.utils import get_display_name
 
 from translator_bot.ai import OpenAIService
-from translator_bot.bot_api import send_bot_media, send_bot_message, set_bot_commands
+from translator_bot.bot_api import fetch_bot_updates, send_bot_media, send_bot_message, set_bot_commands
 from translator_bot.config import ChatSettings, Settings, load_settings
 from translator_bot.config_watcher import ConfigWatcher
 from translator_bot.formatting import (
@@ -189,6 +189,7 @@ class TelegramTranslatorApp:
                 document["suggested_replies"] = suggested_replies
             if self._should_send_translation(chat_settings, important):
                 await self._send_translation(
+                    destination=self._translation_destination_for_chat(chat_settings),
                     source_message=message,
                     chat_title=chat_title,
                     chat_title_translation=chat_title_translation,
@@ -205,6 +206,7 @@ class TelegramTranslatorApp:
             logger.info("Stored non-Chinese message chat_id=%s message_id=%s", chat_id, message.id)
             if attachment and self._should_send_attachment_only(chat_settings):
                 await self._send_translation(
+                    destination=self._translation_destination_for_chat(chat_settings),
                     source_message=message,
                     chat_title=chat_title,
                     chat_title_translation=chat_title_translation,
@@ -241,6 +243,14 @@ class TelegramTranslatorApp:
         if not chat_settings.instant_translation or chat_settings.muted or chat_settings.important_only:
             return False
         return True
+
+    def _translation_destination_for_chat(self, chat_settings: ChatSettings) -> int | str:
+        return chat_settings.target_bot_chat_id or self.settings.telegram.send_translations_to_chat_id
+
+    def _summary_destination_for_chat(self, chat_settings: ChatSettings | None) -> int | str:
+        if chat_settings and chat_settings.target_bot_chat_id:
+            return chat_settings.target_bot_chat_id
+        return self.settings.telegram.send_summaries_to_chat_id
 
     def _reply_suggestions_enabled(self, chat_settings: ChatSettings) -> bool:
         global_enabled = (
@@ -296,6 +306,7 @@ class TelegramTranslatorApp:
 
     async def _send_translation(
         self,
+        destination: int | str,
         source_message: Message | None,
         chat_title: str,
         chat_title_translation: str | None,
@@ -321,7 +332,7 @@ class TelegramTranslatorApp:
             suggested_replies=suggested_replies,
         )
         await self._send_to_destination(
-            self.settings.telegram.send_translations_to_chat_id,
+            destination,
             message,
             source_message=source_message,
         )
@@ -342,6 +353,8 @@ class TelegramTranslatorApp:
             "help": self._cmd_help,
             "list_chats": self._cmd_list_chats,
             "chats": self._cmd_list_chats,
+            "list_bot_chats": self._cmd_list_bot_chats,
+            "bot_chats": self._cmd_list_bot_chats,
             "reload_config": self._cmd_reload_config,
             "reload": self._cmd_reload_config,
             "config_status": self._cmd_config_status,
@@ -413,6 +426,7 @@ class TelegramTranslatorApp:
                     chat_name_translation=chat_name_translation,
                     chat_memories={chat_id: chat_memory} if chat_memory else {},
                     update_memory=True,
+                    destination=self._summary_destination_for_chat(chat_settings),
                 )
 
         await self.storage.set_last_summary_time(key, now)
@@ -425,6 +439,7 @@ class TelegramTranslatorApp:
         chat_name_translation: str | None = None,
         chat_memories: dict[int, dict[str, Any]] | None = None,
         update_memory: bool = False,
+        destination: int | str | None = None,
     ) -> None:
         if not messages:
             return
@@ -446,7 +461,7 @@ class TelegramTranslatorApp:
             chat_name_translation=chat_name_translation,
             timezone_name=self.settings.summary.timezone,
         )
-        await self._send_to_destination(self.settings.telegram.send_summaries_to_chat_id, formatted)
+        await self._send_to_destination(destination or self.settings.telegram.send_summaries_to_chat_id, formatted)
 
     async def _update_chat_memory_from_summary(self, messages: list[dict[str, Any]], summary: str) -> dict[str, Any] | None:
         if not messages:
@@ -486,6 +501,7 @@ class TelegramTranslatorApp:
             [
                 {"command": "help", "description": "Show available commands"},
                 {"command": "list_chats", "description": "List watcher account chats"},
+                {"command": "list_bot_chats", "description": "List bot chat IDs from Bot API updates"},
                 {"command": "config_status", "description": "Show active config summary"},
                 {"command": "reload_config", "description": "Reload config.yaml"},
                 {"command": "test_send", "description": "Send test messages"},
@@ -606,7 +622,7 @@ class TelegramTranslatorApp:
 
     async def _cmd_help(self, args: list[str], message: Message) -> str:
         return (
-            "/list_chats\n/reload_config\n/config_status\n/test_send\n"
+            "/list_chats\n/list_bot_chats\n/reload_config\n/config_status\n/test_send\n"
             "/summary [all|chat_id]\n/translate_last [count]|[chat_id count]\n"
             "/mute <chat_id>\n/unmute <chat_id>\n/enable <chat_id>\n/disable <chat_id>\n"
             "/reply_suggestions [on|off] or /reply_suggestions <chat_id> on|off|inherit\n"
@@ -617,6 +633,13 @@ class TelegramTranslatorApp:
 
     async def _cmd_list_chats(self, args: list[str], message: Message) -> str:
         rows = await list_dialogs(self.client)
+        return "\n".join(rows[:80])
+
+    async def _cmd_list_bot_chats(self, args: list[str], message: Message) -> str:
+        updates = await asyncio.to_thread(fetch_bot_updates, self.settings.telegram.bot_token)
+        rows = _bot_chat_rows_from_updates(updates)
+        if not rows:
+            return "No bot chats found. Ask the target user/group to send /start or any message to the bot first."
         return "\n".join(rows[:80])
 
     async def _cmd_reload_config(self, args: list[str], message: Message) -> str:
@@ -799,6 +822,38 @@ async def list_dialogs(client: TelegramClient) -> list[str]:
     async for dialog in client.iter_dialogs():
         entity = dialog.entity
         rows.append(f"ID: {dialog.id} | Type: {entity.__class__.__name__} | Name: {dialog.name}")
+    return rows
+
+
+def _bot_chat_rows_from_updates(updates: list[dict[str, Any]]) -> list[str]:
+    chats: dict[int, dict[str, Any]] = {}
+    for update in updates:
+        message = (
+            update.get("message")
+            or update.get("edited_message")
+            or update.get("channel_post")
+            or update.get("edited_channel_post")
+        )
+        if not isinstance(message, dict):
+            continue
+        chat = message.get("chat")
+        if not isinstance(chat, dict) or not isinstance(chat.get("id"), int):
+            continue
+        chat_id = int(chat["id"])
+        title = chat.get("title") or " ".join(
+            part for part in [chat.get("first_name"), chat.get("last_name")] if isinstance(part, str)
+        )
+        chats[chat_id] = {
+            "id": chat_id,
+            "type": chat.get("type"),
+            "name": title or chat.get("username") or "",
+            "username": chat.get("username"),
+        }
+
+    rows = []
+    for chat in chats.values():
+        username = f" | Username: @{chat['username']}" if chat.get("username") else ""
+        rows.append(f"ID: {chat['id']} | Type: {chat['type']} | Name: {chat['name']}{username}")
     return rows
 
 
