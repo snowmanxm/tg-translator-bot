@@ -153,6 +153,14 @@ class ReplySuggestionSettings(BaseModel):
         return value
 
 
+class LoggingSettings(BaseModel):
+    level: str = "INFO"
+    file: str = "./logs/bot.log"
+    when: str = "midnight"
+    backup_count: int = 30
+    utc: bool = False
+
+
 class RuntimeSettings(BaseModel):
     config_reload_enabled: bool = True
     command_prefix: str = "/"
@@ -172,6 +180,7 @@ class Settings(BaseModel):
     storage: StorageSettings = Field(default_factory=StorageSettings)
     attachments: AttachmentSettings = Field(default_factory=AttachmentSettings)
     reply_suggestions: ReplySuggestionSettings = Field(default_factory=ReplySuggestionSettings)
+    logging: LoggingSettings = Field(default_factory=LoggingSettings)
     runtime: RuntimeSettings = Field(default_factory=RuntimeSettings)
 
     @model_validator(mode="after")

@@ -8,3 +8,4 @@ config.yaml*
 sessions/
 .git/
 /tmp/
+/logs/

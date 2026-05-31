@@ -5,4 +5,5 @@ config.yaml*
 !.env.example
 /sessions/
 /tmp/
+/logs/
 __pycache__/

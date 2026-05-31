@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from logging.handlers import TimedRotatingFileHandler
 from pathlib import Path
 
 import typer
@@ -20,8 +21,8 @@ console = Console()
 @app.command()
 def run(config: Path = typer.Option(Path("config.yaml"), "--config", "-c", help="Path to config YAML.")) -> None:
     """Run the Telegram translator bot."""
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     settings = load_settings(config)
+    _configure_logging(settings)
     translator = TelegramTranslatorApp(settings, config_path=config)
     asyncio.run(translator.run())
 
@@ -115,6 +116,34 @@ def list_bot_chats(config: Path = typer.Option(Path("config.yaml"), "--config", 
     for chat in chats.values():
         username = f" | Username: @{chat['username']}" if chat.get("username") else ""
         console.print(f"ID: {chat['id']} | Type: {chat['type']} | Name: {chat['name']}{username}")
+
+
+def _configure_logging(settings) -> None:  # type: ignore[no-untyped-def]
+    log_level = getattr(logging, settings.logging.level.upper(), logging.INFO)
+    formatter = logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
+
+    root = logging.getLogger()
+    root.setLevel(log_level)
+    root.handlers.clear()
+
+    console_handler = logging.StreamHandler()
+    console_handler.setFormatter(formatter)
+    console_handler.setLevel(log_level)
+    root.addHandler(console_handler)
+
+    log_file = Path(settings.logging.file)
+    log_file.parent.mkdir(parents=True, exist_ok=True)
+    file_handler = TimedRotatingFileHandler(
+        filename=log_file,
+        when=settings.logging.when,
+        interval=1,
+        backupCount=settings.logging.backup_count,
+        encoding="utf-8",
+        utc=settings.logging.utc,
+    )
+    file_handler.setFormatter(formatter)
+    file_handler.setLevel(log_level)
+    root.addHandler(file_handler)
 
 
 if __name__ == "__main__":

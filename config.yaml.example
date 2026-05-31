@@ -86,6 +86,13 @@ reply_suggestions:
     max_files: 20
     max_chars: 30000
 
+logging:
+  level: "INFO"
+  file: "${LOG_FILE}"
+  when: "midnight"
+  backup_count: 30
+  utc: false
+
 runtime:
   config_reload_enabled: true
   command_prefix: "/"

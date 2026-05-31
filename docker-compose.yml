@@ -10,5 +10,6 @@ services:
       - ./.env.docker:/app/.env:ro
       - ./sessions:/app/sessions
       - ./tmp/attachments:/app/tmp/attachments
+      - ./logs:/app/logs
     extra_hosts:
       - "host.docker.internal:host-gateway"
