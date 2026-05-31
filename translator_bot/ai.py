@@ -17,6 +17,12 @@ class MessageAnalysisResult:
     reason: str | None = None
 
 
+@dataclass(frozen=True)
+class SuggestedReply:
+    zh: str
+    en: str
+
+
 class OpenAIService:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
@@ -161,6 +167,65 @@ class OpenAIService:
             ],
         )
         return response.choices[0].message.content or ""
+
+    async def suggest_replies(
+        self,
+        *,
+        current_message: dict[str, Any],
+        recent_messages: list[dict[str, Any]],
+        chat_memory: dict[str, Any] | None,
+        profile: dict[str, Any],
+        knowledge: str,
+        max_count: int,
+    ) -> list[SuggestedReply]:
+        response = await self.client.chat.completions.create(
+            model=self.settings.openai.summary_model,
+            temperature=0.4,
+            response_format={"type": "json_object"},
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "Generate reply suggestions for a Telegram work chat. Return JSON only with key replies. "
+                        "replies must be an array of objects with zh and en strings. "
+                        "Generate up to max_count replies, but if only one strong reply is useful, return one. "
+                        "Do not pad with weak or duplicate variations. Do not number or label replies. "
+                        "The zh reply should be natural Chinese suitable to send as-is. The en field is the English meaning. "
+                        "Use the profile, chat memory, recent chat context, and markdown knowledge when relevant. "
+                        "Do not invent project facts. If context is insufficient, suggest asking for missing details. "
+                        "Keep replies concise, polite, and practical."
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": json.dumps(
+                        {
+                            "max_count": max_count,
+                            "profile": profile,
+                            "chat_memory": chat_memory or {},
+                            "recent_messages": recent_messages,
+                            "current_message": current_message,
+                            "markdown_knowledge": knowledge,
+                        },
+                        ensure_ascii=False,
+                        default=str,
+                    ),
+                },
+            ],
+        )
+        data = _json_from_response(response.choices[0].message.content)
+        replies = data.get("replies")
+        if not isinstance(replies, list):
+            return []
+        results: list[SuggestedReply] = []
+        for item in replies[:max_count]:
+            if not isinstance(item, dict):
+                continue
+            zh = str(item.get("zh", "")).strip()
+            en = str(item.get("en", "")).strip()
+            if zh and en:
+                results.append(SuggestedReply(zh=zh, en=en))
+        return results
 
     async def summarize(self, messages: list[dict[str, Any]], *, title: str) -> str:
         if not messages:

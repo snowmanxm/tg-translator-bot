@@ -80,6 +80,7 @@ class ChatSettings(BaseModel):
     summaries: bool = True
     important_only: bool = False
     muted: bool = False
+    reply_suggestions: bool | None = None
 
 
 class IgnoreSettings(BaseModel):
@@ -114,6 +115,36 @@ class AttachmentSettings(BaseModel):
     keep_downloaded_files: bool = False
 
 
+class ReplySuggestionProfileSettings(BaseModel):
+    name: str | None = None
+    role: str | None = None
+    style: str = "short, polite, natural"
+    facts: list[str] = Field(default_factory=list)
+
+
+class ReplySuggestionKnowledgeSettings(BaseModel):
+    enabled: bool = True
+    paths: list[str] = Field(default_factory=list)
+    max_files: int = 20
+    max_chars: int = 30000
+
+
+class ReplySuggestionSettings(BaseModel):
+    enabled: bool = False
+    count: int = 3
+    recent_messages: int = 10
+    reload_interval_seconds: int = 300
+    profile: ReplySuggestionProfileSettings = Field(default_factory=ReplySuggestionProfileSettings)
+    knowledge: ReplySuggestionKnowledgeSettings = Field(default_factory=ReplySuggestionKnowledgeSettings)
+
+    @field_validator("count")
+    @classmethod
+    def validate_count(cls, value: int) -> int:
+        if value < 1 or value > 5:
+            raise ValueError("reply_suggestions.count must be between 1 and 5")
+        return value
+
+
 class RuntimeSettings(BaseModel):
     config_reload_enabled: bool = True
     command_prefix: str = "/"
@@ -132,6 +163,7 @@ class Settings(BaseModel):
     summary: SummarySettings = Field(default_factory=SummarySettings)
     storage: StorageSettings = Field(default_factory=StorageSettings)
     attachments: AttachmentSettings = Field(default_factory=AttachmentSettings)
+    reply_suggestions: ReplySuggestionSettings = Field(default_factory=ReplySuggestionSettings)
     runtime: RuntimeSettings = Field(default_factory=RuntimeSettings)
 
     @model_validator(mode="after")

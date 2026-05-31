@@ -70,6 +70,22 @@ attachments:
   download_max_mb: 20
   keep_downloaded_files: false
 
+reply_suggestions:
+  enabled: false
+  count: 2
+  recent_messages: 15
+  reload_interval_seconds: 300
+  profile:
+    name: "林工"
+    role: "后端"
+    style: "short, polite, natural"
+    facts: ["I am one of backend developers"]
+  knowledge:
+    enabled: true
+    paths: []
+    max_files: 20
+    max_chars: 30000
+
 runtime:
   config_reload_enabled: true
   command_prefix: "/"

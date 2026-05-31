@@ -26,6 +26,7 @@ from translator_bot.formatting import (
     restore_protected_segments,
     split_telegram_message,
 )
+from translator_bot.knowledge import KnowledgeCache, KnowledgeStatus
 from translator_bot.language import contains_chinese
 from translator_bot.scheduler import SummaryScheduler
 from translator_bot.storage import MongoStorage
@@ -51,6 +52,10 @@ class TelegramTranslatorApp:
         self.ai = OpenAIService(settings)
         self.storage = MongoStorage(settings)
         self.scheduler = SummaryScheduler(settings)
+        self.knowledge_cache = KnowledgeCache(settings.reply_suggestions.knowledge)
+        self.reply_suggestions_enabled_override: bool | None = None
+        self.reply_suggestions_chat_overrides: dict[int, bool | None] = {}
+        self.reply_count_override: int | None = None
         self.config_watcher: ConfigWatcher | None = None
         self.loop: asyncio.AbstractEventLoop | None = None
 
@@ -63,7 +68,9 @@ class TelegramTranslatorApp:
             daily_job=self.send_daily_summaries,
             prune_job=self.storage.prune_old_messages,
         )
+        self._configure_knowledge_reload_job()
         self.scheduler.start()
+        await self.reload_knowledge()
         if self.settings.runtime.config_reload_enabled:
             self.config_watcher = ConfigWatcher(self.config_path, self._schedule_config_reload)
             self.config_watcher.start()
@@ -170,6 +177,16 @@ class TelegramTranslatorApp:
             important_reason = _important_reason(analysis.reason, alerts) if important else None
             if important_reason:
                 document["important_reason"] = important_reason
+            suggested_replies = await self._maybe_suggest_replies(
+                chat_settings=chat_settings,
+                chat_memory=chat_memory,
+                chat_title=chat_title,
+                current_message=document,
+                alerts=alerts,
+                important=important,
+            )
+            if suggested_replies:
+                document["suggested_replies"] = suggested_replies
             if self._should_send_translation(chat_settings, important):
                 await self._send_translation(
                     source_message=message,
@@ -181,6 +198,7 @@ class TelegramTranslatorApp:
                     translation=translation,
                     important=important,
                     alerts=alerts,
+                    suggested_replies=suggested_replies,
                 )
                 logger.info("Sent translation chat_id=%s message_id=%s", chat_id, message.id)
         else:
@@ -224,6 +242,58 @@ class TelegramTranslatorApp:
             return False
         return True
 
+    def _reply_suggestions_enabled(self, chat_settings: ChatSettings) -> bool:
+        global_enabled = (
+            self.reply_suggestions_enabled_override
+            if self.reply_suggestions_enabled_override is not None
+            else self.settings.reply_suggestions.enabled
+        )
+        chat_override = self.reply_suggestions_chat_overrides.get(chat_settings.id, chat_settings.reply_suggestions)
+        if chat_override is None:
+            return bool(global_enabled)
+        return bool(chat_override)
+
+    def _reply_count(self) -> int:
+        return self.reply_count_override or self.settings.reply_suggestions.count
+
+    async def _maybe_suggest_replies(
+        self,
+        *,
+        chat_settings: ChatSettings,
+        chat_memory: dict[str, Any] | None,
+        chat_title: str,
+        current_message: dict[str, Any],
+        alerts: dict[str, bool],
+        important: bool,
+    ) -> list[dict[str, str]]:
+        if not self._reply_suggestions_enabled(chat_settings):
+            return []
+        if not (alerts.get("question_or_request") or alerts.get("name_mention") or alerts.get("urgent") or important):
+            return []
+
+        chat_id = int(current_message["chat_id"])
+        effective_memory = chat_memory or {"chat_id": chat_id, "chat_title": chat_title}
+        recent = await self.storage.recent_messages(
+            chat_id=chat_id,
+            limit=self.settings.reply_suggestions.recent_messages,
+        )
+        memory_map = {chat_id: effective_memory}
+        current_payload = _message_for_ai(current_message, memory_map)
+        recent_payload = [_message_for_ai(row, memory_map) for row in recent]
+        try:
+            replies = await self.ai.suggest_replies(
+                current_message=current_payload,
+                recent_messages=recent_payload,
+                chat_memory=_reply_chat_memory_payload(effective_memory),
+                profile=self.settings.reply_suggestions.profile.model_dump(),
+                knowledge=self.knowledge_cache.content,
+                max_count=self._reply_count(),
+            )
+        except Exception:
+            logger.exception("Failed to generate reply suggestions")
+            return []
+        return [{"zh": reply.zh, "en": reply.en} for reply in replies]
+
     async def _send_translation(
         self,
         source_message: Message | None,
@@ -235,6 +305,7 @@ class TelegramTranslatorApp:
         translation: str,
         important: bool = False,
         alerts: dict[str, bool] | None = None,
+        suggested_replies: list[dict[str, str]] | None = None,
     ) -> None:
         include_original = self.settings.features.original_plus_translation
         message = format_translation(
@@ -247,6 +318,7 @@ class TelegramTranslatorApp:
             include_original=include_original,
             important=important,
             alerts=alerts,
+            suggested_replies=suggested_replies,
         )
         await self._send_to_destination(
             self.settings.telegram.send_translations_to_chat_id,
@@ -283,6 +355,10 @@ class TelegramTranslatorApp:
             "enable": self._cmd_enable,
             "disable": self._cmd_disable,
             "important_only": self._cmd_important_only,
+            "reply_suggestions": self._cmd_reply_suggestions,
+            "reply_count": self._cmd_reply_count,
+            "reload_knowledge": self._cmd_reload_knowledge,
+            "knowledge_status": self._cmd_knowledge_status,
             "ignored_users": self._cmd_ignored_users,
             "ignore_user": self._cmd_ignore_user,
             "unignore_user": self._cmd_unignore_user,
@@ -411,6 +487,10 @@ class TelegramTranslatorApp:
                 {"command": "test_send", "description": "Send test messages"},
                 {"command": "summary", "description": "Generate a manual summary"},
                 {"command": "translate_last", "description": "Translate recent stored messages"},
+                {"command": "reply_suggestions", "description": "Show or change reply suggestion switch"},
+                {"command": "reply_count", "description": "Show or change reply suggestion count"},
+                {"command": "reload_knowledge", "description": "Reload reply knowledge markdown files"},
+                {"command": "knowledge_status", "description": "Show reply knowledge cache status"},
                 {"command": "ignored_users", "description": "List ignored users"},
                 {"command": "ignored_chats", "description": "List ignored chats"},
             ],
@@ -468,6 +548,23 @@ class TelegramTranslatorApp:
         downloaded = await message.download_media(file=str(temp_dir))
         return Path(downloaded) if downloaded else None
 
+    def _configure_knowledge_reload_job(self) -> None:
+        with suppress(Exception):
+            self.scheduler.scheduler.remove_job("knowledge-reload")
+        settings = self.settings.reply_suggestions
+        if not settings.knowledge.enabled or not settings.knowledge.paths:
+            return
+        self.scheduler.scheduler.add_job(
+            self.reload_knowledge,
+            "interval",
+            seconds=settings.reload_interval_seconds,
+            id="knowledge-reload",
+            replace_existing=True,
+        )
+
+    async def reload_knowledge(self):
+        return await self.knowledge_cache.reload()
+
     def _schedule_config_reload(self) -> None:
         if self.loop:
             self.loop.call_soon_threadsafe(lambda: asyncio.create_task(self._reload_config_from_watcher()))
@@ -492,12 +589,15 @@ class TelegramTranslatorApp:
         self.settings = new_settings
         self.ai = OpenAIService(new_settings)
         self.storage.settings = new_settings
+        self.knowledge_cache = KnowledgeCache(new_settings.reply_suggestions.knowledge)
         self.scheduler.settings = new_settings
         self.scheduler.configure(
             hourly_job=self.send_hourly_summaries,
             daily_job=self.send_daily_summaries,
             prune_job=self.storage.prune_old_messages,
         )
+        self._configure_knowledge_reload_job()
+        await self.reload_knowledge()
         return "Config reloaded successfully."
 
     async def _cmd_help(self, args: list[str], message: Message) -> str:
@@ -505,6 +605,8 @@ class TelegramTranslatorApp:
             "/list_chats\n/reload_config\n/config_status\n/test_send\n"
             "/summary [all|chat_id]\n/translate_last [count]|[chat_id count]\n"
             "/mute <chat_id>\n/unmute <chat_id>\n/enable <chat_id>\n/disable <chat_id>\n"
+            "/reply_suggestions [on|off] or /reply_suggestions <chat_id> on|off|inherit\n"
+            "/reply_count [1-5]\n/reload_knowledge\n/knowledge_status\n"
             "/important_only <chat_id> on|off\n/ignored_users\n/ignore_user <user_id>\n"
             "/unignore_user <user_id>\n/ignored_chats\n/ignore_chat <chat_id>\n/unignore_chat <chat_id>"
         )
@@ -600,6 +702,54 @@ class TelegramTranslatorApp:
         chat.important_only = args[1].lower() == "on"
         return f"Important-only for {chat.id}: {chat.important_only}"
 
+    async def _cmd_reply_suggestions(self, args: list[str], message: Message) -> str:
+        if not args:
+            global_enabled = (
+                self.reply_suggestions_enabled_override
+                if self.reply_suggestions_enabled_override is not None
+                else self.settings.reply_suggestions.enabled
+            )
+            overridden = [
+                f"{chat_id}: {'inherit' if value is None else value}"
+                for chat_id, value in sorted(self.reply_suggestions_chat_overrides.items())
+            ]
+            details = "\n".join(overridden) if overridden else "No runtime chat overrides."
+            return f"Reply suggestions global: {global_enabled}\n{details}"
+
+        if len(args) == 1:
+            value = _parse_on_off(args[0])
+            if value is None:
+                return "Usage: /reply_suggestions on|off or /reply_suggestions <chat_id> on|off|inherit"
+            self.reply_suggestions_enabled_override = value
+            return f"Reply suggestions global: {value}"
+
+        chat_id = int(args[0])
+        action = args[1].lower()
+        if action == "inherit":
+            self.reply_suggestions_chat_overrides.pop(chat_id, None)
+            return f"Reply suggestions for {chat_id}: inherit"
+        value = _parse_on_off(action)
+        if value is None:
+            return "Usage: /reply_suggestions <chat_id> on|off|inherit"
+        self.reply_suggestions_chat_overrides[chat_id] = value
+        return f"Reply suggestions for {chat_id}: {value}"
+
+    async def _cmd_reply_count(self, args: list[str], message: Message) -> str:
+        if not args:
+            return f"Reply suggestion count: {self._reply_count()}"
+        count = int(args[0])
+        if count < 1 or count > 5:
+            return "Reply suggestion count must be between 1 and 5."
+        self.reply_count_override = count
+        return f"Reply suggestion count updated to {count}."
+
+    async def _cmd_reload_knowledge(self, args: list[str], message: Message) -> str:
+        status = await self.reload_knowledge()
+        return _format_knowledge_status(status)
+
+    async def _cmd_knowledge_status(self, args: list[str], message: Message) -> str:
+        return _format_knowledge_status(self.knowledge_cache.status())
+
     async def _cmd_ignored_users(self, args: list[str], message: Message) -> str:
         return "\n".join(str(user_id) for user_id in sorted(self.settings.ignore.users)) or "No ignored users."
 
@@ -681,6 +831,37 @@ def _chat_title_translation_from_memory(chat_memory: dict[str, Any] | None) -> s
     if translation:
         return str(translation)
     return None
+
+
+def _reply_chat_memory_payload(chat_memory: dict[str, Any] | None) -> dict[str, Any]:
+    if not chat_memory:
+        return {}
+    return {
+        "chat_title": chat_memory.get("chat_title"),
+        "chat_title_translation": chat_memory.get("chat_title_translation"),
+        "memory": chat_memory.get("memory", {}),
+    }
+
+
+def _parse_on_off(value: str) -> bool | None:
+    normalized = value.lower()
+    if normalized in {"on", "true", "yes", "1"}:
+        return True
+    if normalized in {"off", "false", "no", "0"}:
+        return False
+    return None
+
+
+def _format_knowledge_status(status: KnowledgeStatus) -> str:
+    loaded_at = status.last_loaded_at.isoformat() if status.last_loaded_at else "never"
+    paths = "\n".join(status.paths) if status.paths else "No paths configured."
+    return (
+        f"Knowledge enabled: {status.enabled}\n"
+        f"Files loaded: {status.file_count}\n"
+        f"Characters loaded: {status.char_count}\n"
+        f"Last loaded: {loaded_at}\n"
+        f"Paths:\n{paths}"
+    )
 
 
 def _attachment_metadata(message: Message) -> dict[str, Any] | None:

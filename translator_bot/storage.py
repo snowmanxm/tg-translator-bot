@@ -109,7 +109,6 @@ class MongoStorage:
                         "open_items": [],
                         "preferences_or_terms": [],
                     },
-                    "stats.message_count_seen": 0,
                 },
                 "$inc": {"stats.message_count_seen": 1},
             },

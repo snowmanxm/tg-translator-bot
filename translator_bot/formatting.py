@@ -60,6 +60,7 @@ def format_translation(
     include_original: bool,
     important: bool = False,
     alerts: dict[str, bool] | None = None,
+    suggested_replies: list[dict[str, str]] | None = None,
 ) -> str:
     sender = f"<code>{escape(sender_name)}</code>"
     if sender_username:
@@ -74,6 +75,15 @@ def format_translation(
         parts.extend(["", "🇨🇳", render_message_body(original)])
     if translation:
         parts.extend(["", "🇬🇧", render_message_body(translation)])
+    if suggested_replies:
+        parts.extend(["", "💡 <b>Suggested Replies</b>"])
+        for reply in suggested_replies:
+            zh = reply.get("zh")
+            en = reply.get("en")
+            if zh:
+                parts.extend(["", "🇨🇳", render_message_body(zh)])
+            if en:
+                parts.extend(["🇬🇧", render_message_body(en)])
     return "\n".join(part for part in parts if part != "")
 
 
