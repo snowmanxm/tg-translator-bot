@@ -42,7 +42,6 @@ alerts:
 
 chats:
   - id: -1001111111111
-    name: "Example Work Group"
     enabled: true
     instant_translation: true
     summaries: true

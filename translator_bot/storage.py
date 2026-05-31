@@ -96,9 +96,15 @@ class MongoStorage:
             update["stats.last_message_id"] = last_message_id
         if last_message_at is not None:
             update["stats.last_message_at"] = last_message_at
+        existing = await self.get_chat_memory(chat_id)
+        unset: dict[str, Any] = {}
+        if existing and existing.get("chat_title") != chat_title:
+            update["chat_title_translation_stale"] = True
+            unset["chat_title_translation"] = ""
         await self.chat_memories.update_one(
             {"chat_id": chat_id},
-            {
+            _without_empty_update_operators(
+                {
                 "$set": update,
                 "$setOnInsert": {
                     "created_at": now,
@@ -110,8 +116,10 @@ class MongoStorage:
                         "preferences_or_terms": [],
                     },
                 },
+                "$unset": unset,
                 "$inc": {"stats.message_count_seen": 1},
-            },
+                }
+            ),
             upsert=True,
         )
 
@@ -130,3 +138,7 @@ class MongoStorage:
 
     async def set_last_summary_time(self, key: str, value: datetime) -> None:
         await self.runtime.update_one({"key": key}, {"$set": {"value": value}}, upsert=True)
+
+
+def _without_empty_update_operators(update: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    return {operator: value for operator, value in update.items() if value}

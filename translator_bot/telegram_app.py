@@ -135,7 +135,7 @@ class TelegramTranslatorApp:
         sender = await message.get_sender()
         chat_title = get_display_name(chat) or str(chat_id)
         chat_memory = await self.storage.get_chat_memory(chat_id)
-        chat_title_translation = _chat_title_translation_from_memory(chat_memory)
+        chat_title_translation = _chat_title_translation_from_memory(chat_memory, current_title=chat_title)
         sender_name = get_display_name(sender) or str(sender_id)
         sender_username = getattr(sender, "username", None)
         is_chinese = contains_chinese(text)
@@ -268,7 +268,7 @@ class TelegramTranslatorApp:
     ) -> list[dict[str, str]]:
         if not self._reply_suggestions_enabled(chat_settings):
             return []
-        if not (alerts.get("question_or_request") or alerts.get("name_mention") or alerts.get("urgent") or important):
+        if not (alerts.get("question_or_request") or alerts.get("name_mention") or alerts.get("urgent")):
             return []
 
         chat_id = int(current_message["chat_id"])
@@ -405,7 +405,7 @@ class TelegramTranslatorApp:
                 chat_memory = await self.storage.get_chat_memory(chat_id)
                 chat_settings = self.settings.chat_for(chat_id)
                 chat_name = _chat_title_from_memory(chat_memory) or (chat_settings.name if chat_settings else str(chat_id))
-                chat_name_translation = _chat_title_translation_from_memory(chat_memory)
+                chat_name_translation = _chat_title_translation_from_memory(chat_memory, current_title=chat_name)
                 await self._summarize_and_send(
                     messages,
                     f"{period.title()} Summary",
@@ -433,7 +433,10 @@ class TelegramTranslatorApp:
         if update_memory:
             updated_memory = await self._update_chat_memory_from_summary(messages, summary)
             chat_name = chat_name or _chat_title_from_memory(updated_memory)
-            chat_name_translation = chat_name_translation or _chat_title_translation_from_memory(updated_memory)
+            chat_name_translation = chat_name_translation or _chat_title_translation_from_memory(
+                updated_memory,
+                current_title=chat_name,
+            )
         summary_timezone = ZoneInfo(self.settings.summary.timezone)
         formatted = format_summary(
             title,
@@ -464,6 +467,7 @@ class TelegramTranslatorApp:
             "chat_id": chat_id,
             "chat_title": chat_title,
             "chat_title_translation": update["chat_title_translation"],
+            "chat_title_translation_stale": False,
             "memory": update["memory"],
             "stats": {
                 "message_count_seen": previous.get("stats", {}).get("message_count_seen", len(messages)) if previous else len(messages),
@@ -802,7 +806,7 @@ def _message_for_ai(message: dict[str, Any], chat_memories: dict[int, dict[str, 
     chat_id = int(message["chat_id"])
     chat_memory = chat_memories.get(chat_id)
     chat_title = _chat_title_from_memory(chat_memory) or str(chat_id)
-    chat_title_translation = _chat_title_translation_from_memory(chat_memory)
+    chat_title_translation = _chat_title_translation_from_memory(chat_memory, current_title=chat_title)
     return {
         "chat": chat_title,
         "chat_translation": chat_title_translation,
@@ -824,8 +828,16 @@ def _chat_title_from_memory(chat_memory: dict[str, Any] | None) -> str | None:
     return str(title) if title else None
 
 
-def _chat_title_translation_from_memory(chat_memory: dict[str, Any] | None) -> str | None:
+def _chat_title_translation_from_memory(
+    chat_memory: dict[str, Any] | None,
+    *,
+    current_title: str | None = None,
+) -> str | None:
     if not chat_memory:
+        return None
+    if chat_memory.get("chat_title_translation_stale"):
+        return None
+    if current_title and chat_memory.get("chat_title") != current_title:
         return None
     translation = chat_memory.get("chat_title_translation")
     if translation:
