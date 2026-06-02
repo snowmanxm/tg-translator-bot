@@ -20,11 +20,22 @@ def fetch_bot_updates(bot_token: str) -> list[dict[str, Any]]:
     return result if isinstance(result, list) else []
 
 
-def send_bot_message_sync(bot_token: str, chat_id: int | str, text: str, *, parse_mode: str | None = None) -> None:
+def send_bot_message_sync(
+    bot_token: str,
+    chat_id: int | str,
+    text: str,
+    *,
+    parse_mode: str | None = None,
+    reply_to_message_id: int | None = None,
+) -> int | None:
     data: dict[str, Any] = {"chat_id": chat_id, "text": text}
     if parse_mode:
         data["parse_mode"] = parse_mode
-    _bot_api_request(bot_token, "sendMessage", data=data)
+    if reply_to_message_id:
+        data["reply_to_message_id"] = reply_to_message_id
+        data["allow_sending_without_reply"] = "true"
+    payload = _bot_api_request(bot_token, "sendMessage", data=data)
+    return _message_id_from_payload(payload)
 
 
 def send_bot_media_sync(
@@ -35,24 +46,43 @@ def send_bot_media_sync(
     media_type: str,
     caption: str | None = None,
     parse_mode: str | None = None,
-) -> None:
+    reply_to_message_id: int | None = None,
+) -> int | None:
     method, field_name = _media_method_and_field(media_type)
     data: dict[str, Any] = {"chat_id": chat_id}
     if caption:
         data["caption"] = caption
     if parse_mode:
         data["parse_mode"] = parse_mode
-    _bot_api_request_multipart(bot_token, method, data=data, file_field=field_name, file_path=Path(file_path))
+    if reply_to_message_id:
+        data["reply_to_message_id"] = reply_to_message_id
+        data["allow_sending_without_reply"] = "true"
+    payload = _bot_api_request_multipart(bot_token, method, data=data, file_field=field_name, file_path=Path(file_path))
+    return _message_id_from_payload(payload)
 
 
 def set_bot_commands_sync(bot_token: str, commands: list[dict[str, str]]) -> None:
     _bot_api_request(bot_token, "setMyCommands", data={"commands": json.dumps(commands)})
 
 
-async def send_bot_message(bot_token: str, chat_id: int | str, text: str, *, parse_mode: str | None = None) -> None:
+async def send_bot_message(
+    bot_token: str,
+    chat_id: int | str,
+    text: str,
+    *,
+    parse_mode: str | None = None,
+    reply_to_message_id: int | None = None,
+) -> int | None:
     import asyncio
 
-    await asyncio.to_thread(send_bot_message_sync, bot_token, chat_id, text, parse_mode=parse_mode)
+    return await asyncio.to_thread(
+        send_bot_message_sync,
+        bot_token,
+        chat_id,
+        text,
+        parse_mode=parse_mode,
+        reply_to_message_id=reply_to_message_id,
+    )
 
 
 async def send_bot_media(
@@ -63,10 +93,11 @@ async def send_bot_media(
     media_type: str,
     caption: str | None = None,
     parse_mode: str | None = None,
-) -> None:
+    reply_to_message_id: int | None = None,
+) -> int | None:
     import asyncio
 
-    await asyncio.to_thread(
+    return await asyncio.to_thread(
         send_bot_media_sync,
         bot_token,
         chat_id,
@@ -74,6 +105,7 @@ async def send_bot_media(
         media_type=media_type,
         caption=caption,
         parse_mode=parse_mode,
+        reply_to_message_id=reply_to_message_id,
     )
 
 
@@ -150,6 +182,14 @@ def _bot_api_request_multipart(
         description = payload.get("description", "unknown error")
         raise BotApiError(f"Telegram Bot API error: {description}")
     return payload
+
+
+def _message_id_from_payload(payload: dict[str, Any]) -> int | None:
+    result = payload.get("result")
+    if not isinstance(result, dict):
+        return None
+    message_id = result.get("message_id")
+    return int(message_id) if isinstance(message_id, int) else None
 
 
 def _media_method_and_field(media_type: str) -> tuple[str, str]:

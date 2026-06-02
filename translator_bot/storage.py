@@ -34,6 +34,24 @@ class MongoStorage:
             upsert=True,
         )
 
+    async def get_translated_message_id(
+        self,
+        *,
+        chat_id: int,
+        message_id: int,
+        translated_chat_id: int | str,
+    ) -> int | None:
+        row = await self.messages.find_one(
+            {
+                "chat_id": chat_id,
+                "message_id": message_id,
+                "translated_chat_id": translated_chat_id,
+            },
+            {"translated_message_id": 1},
+        )
+        translated_message_id = row.get("translated_message_id") if row else None
+        return int(translated_message_id) if isinstance(translated_message_id, int) else None
+
     async def recent_messages(
         self,
         *,

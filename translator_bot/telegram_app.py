@@ -140,10 +140,12 @@ class TelegramTranslatorApp:
         sender_username = getattr(sender, "username", None)
         is_chinese = contains_chinese(text)
         message_date = message.date.astimezone(UTC) if message.date else datetime.now(UTC)
+        reply_to_message_id = getattr(message, "reply_to_msg_id", None)
 
         document = {
             "chat_id": chat_id,
             "message_id": message.id,
+            "reply_to_message_id": reply_to_message_id,
             "sender_id": sender_id,
             "sender_name": sender_name,
             "sender_username": sender_username,
@@ -188,8 +190,14 @@ class TelegramTranslatorApp:
             if suggested_replies:
                 document["suggested_replies"] = suggested_replies
             if self._should_send_translation(chat_settings, important):
-                await self._send_translation(
-                    destination=self._translation_destination_for_chat(chat_settings),
+                destination = self._translation_destination_for_chat(chat_settings)
+                translated_reply_to_message_id = await self._translated_reply_to_message_id(
+                    chat_id=chat_id,
+                    reply_to_message_id=reply_to_message_id,
+                    destination=destination,
+                )
+                translated_message_id = await self._send_translation(
+                    destination=destination,
                     source_message=message,
                     chat_title=chat_title,
                     chat_title_translation=chat_title_translation,
@@ -200,13 +208,25 @@ class TelegramTranslatorApp:
                     important=important,
                     alerts=alerts,
                     suggested_replies=suggested_replies,
+                    reply_to_message_id=translated_reply_to_message_id,
                 )
+                document["translated_chat_id"] = _normalize_destination(destination)
+                if translated_message_id:
+                    document["translated_message_id"] = translated_message_id
+                if translated_reply_to_message_id:
+                    document["translated_reply_to_message_id"] = translated_reply_to_message_id
                 logger.info("Sent translation chat_id=%s message_id=%s", chat_id, message.id)
         else:
             logger.info("Stored non-Chinese message chat_id=%s message_id=%s", chat_id, message.id)
-            if attachment and self._should_send_attachment_only(chat_settings):
-                await self._send_translation(
-                    destination=self._translation_destination_for_chat(chat_settings),
+            if self._should_send_translation(chat_settings, important=False):
+                destination = self._translation_destination_for_chat(chat_settings)
+                translated_reply_to_message_id = await self._translated_reply_to_message_id(
+                    chat_id=chat_id,
+                    reply_to_message_id=reply_to_message_id,
+                    destination=destination,
+                )
+                translated_message_id = await self._send_translation(
+                    destination=destination,
                     source_message=message,
                     chat_title=chat_title,
                     chat_title_translation=chat_title_translation,
@@ -216,7 +236,13 @@ class TelegramTranslatorApp:
                     translation="",
                     important=False,
                     alerts=None,
+                    reply_to_message_id=translated_reply_to_message_id,
                 )
+                document["translated_chat_id"] = _normalize_destination(destination)
+                if translated_message_id:
+                    document["translated_message_id"] = translated_message_id
+                if translated_reply_to_message_id:
+                    document["translated_reply_to_message_id"] = translated_reply_to_message_id
 
         await self.storage.save_message(document)
         await self.storage.touch_chat_memory_metadata(
@@ -235,17 +261,23 @@ class TelegramTranslatorApp:
             return False
         return True
 
-    def _should_send_attachment_only(self, chat_settings: ChatSettings) -> bool:
-        if not self.settings.attachments.enabled or not self.settings.attachments.forward_displayable:
-            return False
-        if not self.settings.features.instant_translation:
-            return False
-        if not chat_settings.instant_translation or chat_settings.muted or chat_settings.important_only:
-            return False
-        return True
-
     def _translation_destination_for_chat(self, chat_settings: ChatSettings) -> int | str:
         return chat_settings.target_bot_chat_id or self.settings.telegram.send_translations_to_chat_id
+
+    async def _translated_reply_to_message_id(
+        self,
+        *,
+        chat_id: int,
+        reply_to_message_id: int | None,
+        destination: int | str,
+    ) -> int | None:
+        if not reply_to_message_id:
+            return None
+        return await self.storage.get_translated_message_id(
+            chat_id=chat_id,
+            message_id=reply_to_message_id,
+            translated_chat_id=_normalize_destination(destination),
+        )
 
     def _summary_destination_for_chat(self, chat_settings: ChatSettings | None) -> int | str:
         if chat_settings and chat_settings.target_bot_chat_id:
@@ -317,7 +349,8 @@ class TelegramTranslatorApp:
         important: bool = False,
         alerts: dict[str, bool] | None = None,
         suggested_replies: list[dict[str, str]] | None = None,
-    ) -> None:
+        reply_to_message_id: int | None = None,
+    ) -> int | None:
         include_original = self.settings.features.original_plus_translation
         message = format_translation(
             chat_title=chat_title,
@@ -331,10 +364,11 @@ class TelegramTranslatorApp:
             alerts=alerts,
             suggested_replies=suggested_replies,
         )
-        await self._send_to_destination(
+        return await self._send_to_destination(
             destination,
             message,
             source_message=source_message,
+            reply_to_message_id=reply_to_message_id,
         )
 
     async def _handle_command(self, message: Message) -> None:
@@ -522,11 +556,12 @@ class TelegramTranslatorApp:
         text: str,
         *,
         source_message: Message | None = None,
-    ) -> None:
-        if isinstance(destination, str) and destination.strip().lstrip("-").isdigit():
-            destination = int(destination)
+        reply_to_message_id: int | None = None,
+    ) -> int | None:
+        destination = _normalize_destination(destination)
         media_path: Path | None = None
         media_type: str | None = None
+        first_sent_message_id: int | None = None
         if source_message and self.settings.attachments.enabled and self.settings.attachments.forward_displayable:
             media_type = _displayable_media_type(source_message)
             if media_type and _media_within_size_limit(source_message, self.settings.attachments.download_max_mb):
@@ -535,32 +570,41 @@ class TelegramTranslatorApp:
         if media_path and media_type:
             try:
                 if len(text) <= 1024 and _media_supports_caption(media_type):
-                    await send_bot_media(
+                    return await send_bot_media(
                         self.settings.telegram.bot_token,
                         destination,
                         media_path,
                         media_type=media_type,
                         caption=text,
                         parse_mode="HTML",
+                        reply_to_message_id=reply_to_message_id,
                     )
-                    return
-                await send_bot_media(
+                first_sent_message_id = await send_bot_media(
                     self.settings.telegram.bot_token,
                     destination,
                     media_path,
                     media_type=media_type,
+                    reply_to_message_id=reply_to_message_id,
                 )
                 if not text:
-                    return
+                    return first_sent_message_id
             finally:
                 if not self.settings.attachments.keep_downloaded_files:
                     with suppress(OSError):
                         media_path.unlink()
 
         if not text:
-            return
+            return first_sent_message_id
         for chunk in split_telegram_message(text):
-            await send_bot_message(self.settings.telegram.bot_token, destination, chunk, parse_mode="HTML")
+            sent_message_id = await send_bot_message(
+                self.settings.telegram.bot_token,
+                destination,
+                chunk,
+                parse_mode="HTML",
+                reply_to_message_id=reply_to_message_id if first_sent_message_id is None else None,
+            )
+            first_sent_message_id = first_sent_message_id or sent_message_id
+        return first_sent_message_id
 
     async def _download_attachment(self, message: Message) -> Path | None:
         temp_dir = Path(self.settings.attachments.temp_dir)
@@ -855,6 +899,12 @@ def _bot_chat_rows_from_updates(updates: list[dict[str, Any]]) -> list[str]:
         username = f" | Username: @{chat['username']}" if chat.get("username") else ""
         rows.append(f"ID: {chat['id']} | Type: {chat['type']} | Name: {chat['name']}{username}")
     return rows
+
+
+def _normalize_destination(destination: int | str) -> int | str:
+    if isinstance(destination, str) and destination.strip().lstrip("-").isdigit():
+        return int(destination)
+    return destination
 
 
 def _message_for_ai(message: dict[str, Any], chat_memories: dict[int, dict[str, Any]]) -> dict[str, Any]:
