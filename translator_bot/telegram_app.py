@@ -97,12 +97,12 @@ class TelegramTranslatorApp:
             await self.storage.close()
 
     def _register_handlers(self) -> None:
-        @self.client.on(events.NewMessage(incoming=True))
-        async def incoming_handler(event: events.NewMessage.Event) -> None:
+        @self.client.on(events.NewMessage())
+        async def source_message_handler(event: events.NewMessage.Event) -> None:
             try:
                 await self._handle_incoming(event.message)
             except Exception:
-                logger.exception("Failed to handle incoming message")
+                logger.exception("Failed to handle source message")
 
         @self.bot_client.on(events.NewMessage(incoming=True))
         async def bot_command_handler(event: events.NewMessage.Event) -> None:
