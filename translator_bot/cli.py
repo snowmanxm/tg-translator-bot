@@ -11,7 +11,14 @@ from telethon import TelegramClient
 
 from translator_bot.bot_api import BotApiError, fetch_bot_updates, send_bot_message_sync
 from translator_bot.config import load_settings
-from translator_bot.telegram_app import TelegramTranslatorApp, list_dialogs
+from translator_bot.storage import MongoStorage
+from translator_bot.telegram_app import (
+    TelegramTranslatorApp,
+    _bot_chat_documents_from_updates,
+    _bot_chat_rows,
+    _configured_bot_chat_documents,
+    list_dialogs,
+)
 
 
 app = typer.Typer(help="Telegram Chinese-to-English translator bot.")
@@ -80,42 +87,29 @@ def test_send(config: Path = typer.Option(Path("config.yaml"), "--config", "-c")
 
 @app.command("list-bot-chats")
 def list_bot_chats(config: Path = typer.Option(Path("config.yaml"), "--config", "-c")) -> None:
-    """Print chats that have messaged the sender bot via Bot API updates."""
+    """Print known chats for the sender bot."""
     settings = load_settings(config)
-    updates = fetch_bot_updates(settings.telegram.bot_token)
-    chats: dict[int, dict[str, str | int | None]] = {}
 
-    for update in updates:
-        message = (
-            update.get("message")
-            or update.get("edited_message")
-            or update.get("channel_post")
-            or update.get("edited_channel_post")
-        )
-        if not isinstance(message, dict):
-            continue
-        chat = message.get("chat")
-        if not isinstance(chat, dict) or not isinstance(chat.get("id"), int):
-            continue
-        chat_id = chat["id"]
-        title = chat.get("title") or " ".join(
-            part for part in [chat.get("first_name"), chat.get("last_name")] if isinstance(part, str)
-        )
-        chats[chat_id] = {
-            "id": chat_id,
-            "type": chat.get("type"),
-            "name": title or chat.get("username") or "",
-            "username": chat.get("username"),
-        }
+    async def _run() -> list[str]:
+        storage = MongoStorage(settings)
+        try:
+            await storage.setup()
+            updates = await asyncio.to_thread(fetch_bot_updates, settings.telegram.bot_token)
+            update_chats = _bot_chat_documents_from_updates(updates)
+            if update_chats:
+                await storage.upsert_bot_chats(update_chats)
+            chats = _configured_bot_chat_documents(settings) + await storage.list_bot_chats()
+            return _bot_chat_rows(chats)
+        finally:
+            await storage.close()
 
-    if not chats:
-        console.print("[yellow]No bot chats found.[/yellow]")
-        console.print("Open the bot as user B, send /start or any message, then run this command again.")
+    rows = asyncio.run(_run())
+    if rows:
+        for row in rows[:80]:
+            console.print(row)
         return
-
-    for chat in chats.values():
-        username = f" | Username: @{chat['username']}" if chat.get("username") else ""
-        console.print(f"ID: {chat['id']} | Type: {chat['type']} | Name: {chat['name']}{username}")
+    console.print("[yellow]No bot chats found.[/yellow]")
+    console.print("Make sure the bot is added to the target group or DM, then send a message there.")
 
 
 def _configure_logging(settings) -> None:  # type: ignore[no-untyped-def]

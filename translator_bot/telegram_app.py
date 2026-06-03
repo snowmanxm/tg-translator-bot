@@ -107,6 +107,8 @@ class TelegramTranslatorApp:
         @self.bot_client.on(events.NewMessage(incoming=True))
         async def bot_command_handler(event: events.NewMessage.Event) -> None:
             try:
+                with suppress(Exception):
+                    await self._remember_bot_chat(event.message)
                 await self._handle_command(event.message)
             except Exception:
                 logger.exception("Failed to handle bot command")
@@ -535,7 +537,7 @@ class TelegramTranslatorApp:
             [
                 {"command": "help", "description": "Show available commands"},
                 {"command": "list_chats", "description": "List watcher account chats"},
-                {"command": "list_bot_chats", "description": "List bot chat IDs from Bot API updates"},
+                {"command": "list_bot_chats", "description": "List known bot chat IDs"},
                 {"command": "config_status", "description": "Show active config summary"},
                 {"command": "reload_config", "description": "Reload config.yaml"},
                 {"command": "test_send", "description": "Send test messages"},
@@ -629,6 +631,22 @@ class TelegramTranslatorApp:
     async def reload_knowledge(self):
         return await self.knowledge_cache.reload()
 
+    async def _remember_bot_chat(self, message: Message) -> None:
+        chat_id = int(message.chat_id or 0)
+        if not chat_id:
+            return
+        chat = await message.get_chat()
+        await self.storage.upsert_bot_chat(
+            {
+                "chat_id": chat_id,
+                "type": chat.__class__.__name__,
+                "name": get_display_name(chat) or str(chat_id),
+                "username": getattr(chat, "username", None),
+                "source": "bot_message",
+                "last_seen_at": datetime.now(UTC),
+            }
+        )
+
     def _schedule_config_reload(self) -> None:
         if self.loop:
             self.loop.call_soon_threadsafe(lambda: asyncio.create_task(self._reload_config_from_watcher()))
@@ -681,9 +699,14 @@ class TelegramTranslatorApp:
 
     async def _cmd_list_bot_chats(self, args: list[str], message: Message) -> str:
         updates = await asyncio.to_thread(fetch_bot_updates, self.settings.telegram.bot_token)
-        rows = _bot_chat_rows_from_updates(updates)
+        update_chats = _bot_chat_documents_from_updates(updates)
+        if update_chats:
+            await self.storage.upsert_bot_chats(update_chats)
+
+        chats = _configured_bot_chat_documents(self.settings) + await self.storage.list_bot_chats()
+        rows = _bot_chat_rows(chats)
         if not rows:
-            return "No bot chats found. Ask the target user/group to send /start or any message to the bot first."
+            return "No bot chats found. Make sure the bot is added to the target group or DM, then send a message there."
         return "\n".join(rows[:80])
 
     async def _cmd_reload_config(self, args: list[str], message: Message) -> str:
@@ -869,7 +892,33 @@ async def list_dialogs(client: TelegramClient) -> list[str]:
     return rows
 
 
-def _bot_chat_rows_from_updates(updates: list[dict[str, Any]]) -> list[str]:
+def _configured_bot_chat_documents(settings: Settings) -> list[dict[str, Any]]:
+    documents: list[dict[str, Any]] = []
+    destinations: list[tuple[int | str, str]] = [
+        (settings.telegram.send_translations_to_chat_id, "Translation destination"),
+        (settings.telegram.send_summaries_to_chat_id, "Summary destination"),
+    ]
+    for chat in settings.chats:
+        if chat.target_bot_chat_id is not None:
+            name = chat.name or str(chat.id)
+            destinations.append((chat.target_bot_chat_id, name))
+
+    for destination, name in destinations:
+        normalized = _normalize_destination(destination)
+        documents.append(
+            {
+                "chat_id": normalized,
+                "type": "configured",
+                "name": name,
+                "username": None,
+                "source": "config",
+                "last_seen_at": None,
+            }
+        )
+    return documents
+
+
+def _bot_chat_documents_from_updates(updates: list[dict[str, Any]]) -> list[dict[str, Any]]:
     chats: dict[int, dict[str, Any]] = {}
     for update in updates:
         message = (
@@ -888,16 +937,29 @@ def _bot_chat_rows_from_updates(updates: list[dict[str, Any]]) -> list[str]:
             part for part in [chat.get("first_name"), chat.get("last_name")] if isinstance(part, str)
         )
         chats[chat_id] = {
-            "id": chat_id,
+            "chat_id": chat_id,
             "type": chat.get("type"),
             "name": title or chat.get("username") or "",
             "username": chat.get("username"),
+            "source": "bot_update",
+            "last_seen_at": datetime.now(UTC),
         }
+    return list(chats.values())
 
+
+def _bot_chat_rows(chats: list[dict[str, Any]]) -> list[str]:
     rows = []
-    for chat in chats.values():
+    seen: set[str] = set()
+    for chat in chats:
+        chat_id = chat.get("chat_id")
+        if chat_id is None:
+            continue
+        chat_id_key = str(chat_id)
+        if chat_id_key in seen:
+            continue
+        seen.add(chat_id_key)
         username = f" | Username: @{chat['username']}" if chat.get("username") else ""
-        rows.append(f"ID: {chat['id']} | Type: {chat['type']} | Name: {chat['name']}{username}")
+        rows.append(f"ID: {chat_id} | Type: {chat.get('type')} | Name: {chat.get('name') or ''}{username}")
     return rows
 
 

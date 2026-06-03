@@ -15,6 +15,7 @@ class MongoStorage:
         self.db: AsyncIOMotorDatabase = self.client.get_default_database()
         self.messages = self.db["messages"]
         self.chat_memories = self.db["chat_memories"]
+        self.bot_chats = self.db["bot_chats"]
         self.runtime = self.db["runtime"]
 
     async def setup(self) -> None:
@@ -22,6 +23,7 @@ class MongoStorage:
         await self.messages.create_index([("message_id", 1), ("chat_id", 1)], unique=True)
         await self.messages.create_index("date")
         await self.chat_memories.create_index("chat_id", unique=True)
+        await self.bot_chats.create_index("chat_id", unique=True)
         await self.runtime.create_index("key", unique=True)
 
     async def close(self) -> None:
@@ -85,6 +87,24 @@ class MongoStorage:
         cursor = self.chat_memories.find({"chat_id": {"$in": chat_ids}})
         rows = await cursor.to_list(length=len(chat_ids))
         return {int(row["chat_id"]): row for row in rows}
+
+    async def upsert_bot_chat(self, document: dict[str, Any]) -> None:
+        await self.bot_chats.update_one(
+            {"chat_id": document["chat_id"]},
+            {
+                "$set": document,
+                "$setOnInsert": {"created_at": datetime.now(UTC)},
+            },
+            upsert=True,
+        )
+
+    async def upsert_bot_chats(self, documents: list[dict[str, Any]]) -> None:
+        for document in documents:
+            await self.upsert_bot_chat(document)
+
+    async def list_bot_chats(self, limit: int = 200) -> list[dict[str, Any]]:
+        cursor = self.bot_chats.find({}).sort("last_seen_at", -1).limit(limit)
+        return await cursor.to_list(length=limit)
 
     async def upsert_chat_memory(self, document: dict[str, Any]) -> None:
         await self.chat_memories.update_one(
